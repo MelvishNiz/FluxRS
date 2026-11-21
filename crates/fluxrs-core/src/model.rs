@@ -106,6 +106,34 @@ pub struct Exchange {
     pub intercepted: bool,
     /// Connection was upgraded (e.g. WebSocket).
     pub upgraded: bool,
+    /// HTTPS details (decrypted exchanges only).
+    pub tls: Option<TlsInfo>,
+}
+
+/// Summary of an X.509 certificate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CertSummary {
+    pub subject: String,
+    pub issuer: String,
+    pub not_before: String,
+    pub not_after: String,
+    pub serial: String,
+    pub san: Vec<String>,
+}
+
+/// TLS parameters of both legs of a decrypted exchange.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TlsInfo {
+    pub sni: Option<String>,
+    /// Client <-> FluxRS
+    pub client_version: Option<String>,
+    pub client_cipher: Option<String>,
+    pub client_alpn: Option<String>,
+    /// FluxRS <-> server
+    pub server_version: Option<String>,
+    pub server_cipher: Option<String>,
+    pub server_cert: Option<CertSummary>,
+    pub server_chain_len: usize,
 }
 
 impl Exchange {

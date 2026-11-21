@@ -19,10 +19,14 @@ pub mod nat;
 pub mod rawhttp;
 pub mod rules;
 pub mod tls;
+pub mod tlsinfo;
 
-pub use cert::CertificateAuthority;
+pub use cert::{CertificateAuthority, TrustStatus};
 pub use engine::{CaptureMode, Engine, EngineConfig, RulesHandle};
 pub use events::{EventSink, LogLevel, ProxyEvent};
 pub use intercept::{Decision, InterceptConfig, InterceptPhase, InterceptTicket, Interceptor};
-pub use model::{Exchange, ExchangeId, ExchangeState, HeaderList, RequestData, ResponseData};
+pub use model::{
+    CertSummary, Exchange, ExchangeId, ExchangeState, HeaderList, RequestData, ResponseData,
+    TlsInfo,
+};
 pub use rules::{Action, Filter, FilterField, MatchOp, Rule};

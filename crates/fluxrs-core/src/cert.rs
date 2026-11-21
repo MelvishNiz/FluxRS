@@ -230,6 +230,18 @@ impl CertificateAuthority {
         Ok(Arc::new(cfg))
     }
 
+    /// Serial number of the root CA as plain hex (no separators).
+    pub fn serial_hex(&self) -> String {
+        crate::tlsinfo::summarize_cert(self.ca_der.as_ref())
+            .map(|c| c.serial.replace(':', ""))
+            .unwrap_or_default()
+    }
+
+    /// Is the root CA present in the OS trust store? (blocking, runs certutil)
+    pub fn os_trust_status(&self) -> TrustStatus {
+        os_trust_status(&self.serial_hex())
+    }
+
     /// Install the root CA into the Windows trusted root store.
     pub fn install_in_os_store(&self) -> Result<String, CertError> {
         install_root_ca(&self.ca_cert_path())
@@ -243,6 +255,44 @@ impl ResolvesServerCert for FixedCert {
     fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(self.0.clone())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustStatus {
+    Trusted,
+    NotTrusted,
+    /// Not checkable on this platform.
+    Unknown,
+}
+
+#[cfg(windows)]
+fn os_trust_status(serial: &str) -> TrustStatus {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if serial.is_empty() {
+        return TrustStatus::Unknown;
+    }
+    let found = |user: bool| {
+        let mut cmd = std::process::Command::new("certutil");
+        if user {
+            cmd.arg("-user");
+        }
+        cmd.args(["-store", "Root", serial])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if found(false) || found(true) {
+        TrustStatus::Trusted
+    } else {
+        TrustStatus::NotTrusted
+    }
+}
+
+#[cfg(not(windows))]
+fn os_trust_status(_serial: &str) -> TrustStatus {
+    TrustStatus::Unknown
 }
 
 #[cfg(windows)]
@@ -296,6 +346,8 @@ mod tests {
         let again = ca2.leaf_for("EXAMPLE.com").unwrap();
         assert!(Arc::ptr_eq(&leaf, &again));
         ca2.leaf_for("127.0.0.1").unwrap();
+        assert!(ca2.serial_hex().len() >= 2);
+        assert!(!ca2.serial_hex().contains(':'));
         ca2.server_config("example.com").unwrap();
         let ca3 = CertificateAuthority::regenerate(dir.path()).unwrap();
         assert_ne!(pem1, ca3.ca_pem());

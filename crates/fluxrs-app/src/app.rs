@@ -1,12 +1,12 @@
 //! Application state, event handling and the main layout.
 
 use crate::store::{self, Settings};
-use crate::theme::{self, *};
+use crate::theme::{self, icon, *};
 use crate::views;
 use eframe::egui::{self, Margin, RichText, Stroke};
 use fluxrs_core::{
     CaptureMode, CertificateAuthority, Decision, Engine, EventSink, Exchange, ExchangeId,
-    InterceptTicket, Interceptor, LogLevel, ProxyEvent, Rule, RulesHandle,
+    InterceptTicket, Interceptor, LogLevel, ProxyEvent, Rule, RulesHandle, TrustStatus,
 };
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
@@ -17,6 +17,9 @@ use std::time::SystemTime;
 const MAX_EXCHANGES: usize = 20_000;
 const MAX_LOGS: usize = 2_000;
 
+/// Sidebar entry: view, icon, label, counter, counter color.
+type NavItem = (View, &'static str, &'static str, usize, egui::Color32);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Traffic,
@@ -24,6 +27,21 @@ pub enum View {
     Rules,
     Settings,
     Logs,
+}
+
+impl View {
+    fn title(self) -> (&'static str, &'static str) {
+        match self {
+            View::Traffic => ("Traffic", "Every HTTP and HTTPS exchange, live"),
+            View::Intercept => ("Intercept", "Pause, edit and replay messages in flight"),
+            View::Rules => (
+                "Rewrite rules",
+                "Change requests and responses automatically",
+            ),
+            View::Settings => ("Settings", "Capture, HTTPS certificate and about"),
+            View::Logs => ("Logs", "Engine diagnostics"),
+        }
+    }
 }
 
 pub struct LogLine {
@@ -47,6 +65,8 @@ pub struct FluxApp {
     pub data_dir: PathBuf,
     pub ca: Option<Arc<CertificateAuthority>>,
     pub ca_error: Option<String>,
+    /// Result of the background "is the CA trusted" check.
+    ca_trust: Arc<Mutex<Option<TrustStatus>>>,
     pub settings: Settings,
     pub rules: Vec<Rule>,
     pub rules_handle: RulesHandle,
@@ -91,6 +111,7 @@ impl FluxApp {
             data_dir,
             ca,
             ca_error,
+            ca_trust: Arc::default(),
             settings,
             rules,
             rules_handle,
@@ -115,6 +136,7 @@ impl FluxApp {
             LogLevel::Info,
             format!("Data directory: {}", app.data_dir.display()),
         );
+        app.refresh_ca_trust(&cc.egui_ctx);
         // Command line: --start (begin capture), --view <traffic|intercept|rules|settings|logs>
         let args: Vec<String> = std::env::args().collect();
         if let Some(v) = args
@@ -154,6 +176,38 @@ impl FluxApp {
             color,
             until: now + 3.5,
         });
+    }
+
+    /// Re-check (in the background) whether the root CA is trusted.
+    pub fn refresh_ca_trust(&mut self, ctx: &egui::Context) {
+        let Some(ca) = self.ca.clone() else { return };
+        let slot = self.ca_trust.clone();
+        *slot.lock() = None;
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let status = ca.os_trust_status();
+            *slot.lock() = Some(status);
+            ctx.request_repaint();
+        });
+    }
+
+    pub fn ca_trust(&self) -> Option<TrustStatus> {
+        *self.ca_trust.lock()
+    }
+
+    pub fn install_ca(&mut self, ctx: &egui::Context) {
+        let Some(ca) = self.ca.clone() else { return };
+        match ca.install_in_os_store() {
+            Ok(msg) => {
+                self.log(LogLevel::Info, msg.clone());
+                self.toast(ctx, msg, GREEN);
+            }
+            Err(e) => {
+                self.log(LogLevel::Error, e.to_string());
+                self.toast(ctx, e.to_string(), RED);
+            }
+        }
+        self.refresh_ca_trust(ctx);
     }
 
     pub fn is_running(&self) -> bool {
@@ -304,209 +358,297 @@ impl FluxApp {
         self.exchanges.push(ex);
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui) {
+    // ------------------------------------------------------------ chrome
+
+    fn header(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        ui.horizontal_centered(|ui| {
-            logo(ui, 28.0);
-            ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let (title, subtitle) = self.view.title();
             ui.vertical(|ui| {
-                ui.add_space(2.0);
-                ui.label(RichText::new("FluxRS").size(16.0).strong());
-                ui.label(RichText::new("HTTP Debugger").size(10.5).color(TEXT_DIM));
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(strong(title, 17.0, TEXT));
+                ui.label(RichText::new(subtitle).size(12.0).color(TEXT_FAINT));
             });
-            ui.add_space(18.0);
-
-            // Capture mode segmented control.
-            let running = self.is_running();
-            ui.add_enabled_ui(!running, |ui| {
-                let mode = &mut self.settings.engine.mode;
-                let before = *mode;
-                egui::Frame::new()
-                    .fill(BG)
-                    .corner_radius(egui::CornerRadius::from(9u8))
-                    .inner_margin(Margin::same(3))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            ui.selectable_value(mode, CaptureMode::Proxyless, "⚡ Proxyless");
-                            ui.selectable_value(mode, CaptureMode::Proxy, "🌐 Proxy");
-                        });
-                    });
-                if *mode != before {
-                    self.save_settings();
-                }
-            });
-
-            ui.add_space(8.0);
-            if running {
-                if primary_button(ui, "■  Stop capture", RED).clicked() {
-                    self.stop();
-                    self.toast(&ctx, "Capture stopped", TEXT_DIM);
-                }
-                let addr = self
-                    .engine
-                    .as_ref()
-                    .map(|e| e.local_addr().to_string())
-                    .unwrap_or_default();
-                pill(ui, format!("• LIVE  {addr}"), GREEN);
-            } else if primary_button(ui, "▶  Start capture", GREEN).clicked() {
-                self.start(&ctx);
-            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("🗑  Clear")
-                    .on_hover_text("Clear captured traffic")
-                    .clicked()
-                {
-                    self.clear_traffic();
+                // Record button
+                if self.is_running() {
+                    if primary_button(ui, icon::SQUARE, "Stop", RED).clicked() {
+                        self.stop();
+                        self.toast(&ctx, "Capture stopped", TEXT_DIM);
+                    }
+                } else if primary_button(ui, icon::PLAY, "Start capture", GREEN).clicked() {
+                    self.start(&ctx);
                 }
+                ui.add_space(4.0);
+
+                // Capture mode
+                ui.add_enabled_ui(!self.is_running(), |ui| {
+                    let mut mode = self.settings.engine.mode;
+                    if segmented(
+                        ui,
+                        &mut mode,
+                        &[
+                            (CaptureMode::Proxy, Some(icon::GLOBE), "Proxy"),
+                            (CaptureMode::Proxyless, Some(icon::ZAP), "Proxyless"),
+                        ],
+                    ) {
+                        self.settings.engine.mode = mode;
+                        self.save_settings();
+                    }
+                })
+                .response
+                .on_disabled_hover_text("Stop capture to change the mode");
                 ui.add_space(8.0);
+
+                // Breakpoints
                 let mut on = self.settings.intercept.enabled;
-                let r = toggle(ui, &mut on);
-                if r.changed() {
+                if toggle(ui, &mut on).changed() {
                     self.settings.intercept.enabled = on;
                     self.intercept_changed();
                     if on {
                         self.view = View::Intercept;
                     }
                 }
-                ui.label(
-                    RichText::new("Breakpoints")
-                        .color(if on { ACCENT } else { TEXT_DIM })
-                        .strong(),
-                );
+                ui.label(RichText::new("Breakpoints").color(if on { ACCENT_HI } else { TEXT_DIM }));
                 badge(ui, self.tickets.len(), YELLOW);
             });
         });
     }
 
-    fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(10.0);
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            logo(ui, 30.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(strong("FluxRS", 15.0, TEXT));
+                ui.label(RichText::new("HTTP Debugger").size(11.0).color(TEXT_FAINT));
+            });
+        });
+        ui.add_space(18.0);
+
         let active_rules = self.rules.iter().filter(|r| r.enabled).count();
-        let items: [(View, &str, &str, usize, egui::Color32); 5] = [
+        let sections: [(&str, Vec<NavItem>); 2] = [
             (
-                View::Traffic,
-                "📡",
-                "Traffic",
-                self.exchanges.len(),
-                TEXT_FAINT,
+                "Workspace",
+                vec![
+                    (
+                        View::Traffic,
+                        icon::ACTIVITY,
+                        "Traffic",
+                        self.exchanges.len(),
+                        TEXT_FAINT,
+                    ),
+                    (
+                        View::Intercept,
+                        icon::PAUSE,
+                        "Intercept",
+                        self.tickets.len(),
+                        YELLOW,
+                    ),
+                    (
+                        View::Rules,
+                        icon::WAND,
+                        "Rewrite rules",
+                        active_rules,
+                        ACCENT,
+                    ),
+                ],
             ),
             (
-                View::Intercept,
-                "⏸",
-                "Intercept",
-                self.tickets.len(),
-                YELLOW,
+                "System",
+                vec![
+                    (View::Settings, icon::SETTINGS, "Settings", 0, TEXT_FAINT),
+                    (View::Logs, icon::SCROLL, "Logs", 0, TEXT_FAINT),
+                ],
             ),
-            (View::Rules, "✏", "Rewrite rules", active_rules, ACCENT),
-            (View::Settings, "⚙", "Settings", 0, TEXT_FAINT),
-            (View::Logs, "📜", "Logs", 0, TEXT_FAINT),
         ];
-        for (view, icon, label, count, color) in items {
-            let selected = self.view == view;
-            let fill = if selected {
-                ACCENT_SOFT
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            let resp = egui::Frame::new()
-                .fill(fill)
-                .corner_radius(egui::CornerRadius::from(8u8))
-                .inner_margin(Margin::symmetric(10, 7))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(icon).size(15.0).color(if selected {
-                            ACCENT
-                        } else {
-                            TEXT_DIM
-                        }));
-                        ui.label(
-                            RichText::new(label)
-                                .color(if selected { TEXT } else { TEXT_DIM })
-                                .strong(),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if count > 0 {
-                                if color == TEXT_FAINT {
-                                    ui.label(
-                                        RichText::new(count.to_string())
-                                            .size(11.0)
-                                            .color(TEXT_FAINT),
-                                    );
-                                } else {
-                                    badge(ui, count, color);
-                                }
-                            }
-                        });
-                    });
-                })
-                .response
-                .interact(egui::Sense::click());
-            if resp.clicked() {
-                self.view = view;
-            }
-            if resp.hovered() && !selected {
-                ui.painter().rect_stroke(
-                    resp.rect,
-                    egui::CornerRadius::from(8u8),
-                    Stroke::new(1.0, BORDER),
-                    egui::StrokeKind::Inside,
-                );
-            }
+        for (title, items) in sections {
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                caption(ui, title);
+            });
             ui.add_space(2.0);
+            for (view, ic, label, count, color) in items {
+                self.nav_item(ui, view, ic, label, count, color);
+            }
+            ui.add_space(12.0);
         }
 
-        {
-            // Pin the info card to the bottom of the sidebar.
-            let space = ui.available_height() - 96.0;
-            if space > 0.0 {
-                ui.add_space(space);
-            }
-            card().inner_margin(Margin::same(10)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                {
-                    ui.label(RichText::new("Mode").size(11.0).color(TEXT_FAINT));
-                    let (txt, col) = match self.settings.engine.mode {
-                        CaptureMode::Proxyless => ("Proxyless (WinDivert)", CYAN),
-                        CaptureMode::Proxy => ("Explicit proxy", BLUE),
-                    };
-                    ui.label(RichText::new(txt).color(col).strong());
-                    ui.label(
-                        RichText::new(if self.settings.engine.decrypt_tls {
-                            "HTTPS decryption on"
-                        } else {
-                            "HTTPS decryption off"
-                        })
-                        .size(11.0)
-                        .color(TEXT_DIM),
-                    );
-                }
-            });
+        // Bottom: HTTPS + capture status.
+        let space = ui.available_height() - 132.0;
+        if space > 0.0 {
+            ui.add_space(space);
         }
+        card().inner_margin(Margin::same(12)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let trust = self.ca_trust();
+            let (ic, color, title) = match trust {
+                Some(TrustStatus::Trusted) => (icon::SHIELD_CHECK, GREEN, "HTTPS ready"),
+                Some(TrustStatus::NotTrusted) => {
+                    (icon::SHIELD_ALERT, YELLOW, "Certificate not trusted")
+                }
+                Some(TrustStatus::Unknown) => (icon::KEY, TEXT_DIM, "HTTPS certificate"),
+                None => (icon::KEY, TEXT_FAINT, "Checking certificate…"),
+            };
+            ui.horizontal(|ui| {
+                ui.label(ico(ic, 15.0, color));
+                ui.label(strong(title, 12.5, TEXT));
+            });
+            if trust == Some(TrustStatus::NotTrusted) {
+                ui.add_space(2.0);
+                if ui
+                    .add(
+                        egui::Button::new(strong("Install certificate", 12.0, YELLOW))
+                            .fill(YELLOW.gamma_multiply(0.12))
+                            .stroke(Stroke::new(1.0, YELLOW.gamma_multiply(0.4)))
+                            .min_size(egui::vec2(ui.available_width(), 26.0)),
+                    )
+                    .clicked()
+                {
+                    self.install_ca(&ctx);
+                }
+            } else {
+                ui.label(
+                    RichText::new(if self.settings.engine.decrypt_tls {
+                        "Decryption on"
+                    } else {
+                        "Decryption off"
+                    })
+                    .size(11.5)
+                    .color(TEXT_FAINT),
+                );
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                match &self.engine {
+                    Some(_) => live_dot(ui, GREEN),
+                    None => dot(ui, TEXT_FAINT, 3.5),
+                }
+                let mode = match self.settings.engine.mode {
+                    CaptureMode::Proxyless => "Proxyless",
+                    CaptureMode::Proxy => "Explicit proxy",
+                };
+                ui.label(
+                    RichText::new(if self.is_running() {
+                        format!("{mode} · live")
+                    } else {
+                        format!("{mode} · idle")
+                    })
+                    .size(12.0)
+                    .color(TEXT_DIM),
+                );
+            });
+        });
+        ui.add_space(12.0);
+    }
+
+    fn nav_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        view: View,
+        ic: &str,
+        label: &str,
+        count: usize,
+        color: egui::Color32,
+    ) {
+        let selected = self.view == view;
+        let (rect, resp) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), egui::Sense::click());
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, egui::CornerRadius::from(8u8), RAISED);
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left(), rect.top() + 9.0),
+                    egui::vec2(3.0, 16.0),
+                ),
+                egui::CornerRadius::from(2u8),
+                ACCENT,
+            );
+        } else if resp.hovered() {
+            painter.rect_filled(rect, egui::CornerRadius::from(8u8), SURFACE);
+        }
+        let fg = if selected { TEXT } else { TEXT_DIM };
+        let icon_galley = painter.layout_no_wrap(
+            ic.to_string(),
+            egui::FontId::new(15.0, icon_family()),
+            if selected { ACCENT_HI } else { TEXT_FAINT },
+        );
+        let y = rect.center().y;
+        painter.galley(
+            egui::pos2(rect.left() + 14.0, y - icon_galley.size().y / 2.0),
+            icon_galley,
+            fg,
+        );
+        let font = if selected {
+            sb(13.0)
+        } else {
+            egui::FontId::proportional(13.0)
+        };
+        let text = painter.layout_no_wrap(label.to_string(), font, fg);
+        painter.galley(
+            egui::pos2(rect.left() + 40.0, y - text.size().y / 2.0),
+            text,
+            fg,
+        );
+        if count > 0 {
+            if color == TEXT_FAINT {
+                let g = painter.layout_no_wrap(
+                    count.to_string(),
+                    egui::FontId::proportional(11.5),
+                    TEXT_FAINT,
+                );
+                painter.galley(
+                    egui::pos2(rect.right() - 12.0 - g.size().x, y - g.size().y / 2.0),
+                    g,
+                    TEXT_FAINT,
+                );
+            } else {
+                let g = painter.layout_no_wrap(count.to_string(), sb(10.5), egui::Color32::BLACK);
+                let w = (g.size().x + 10.0).max(18.0);
+                let r = egui::Rect::from_center_size(
+                    egui::pos2(rect.right() - 12.0 - w / 2.0, y),
+                    egui::vec2(w, 17.0),
+                );
+                painter.rect_filled(r, egui::CornerRadius::from(9u8), color);
+                painter.galley(r.center() - g.size() / 2.0, g, egui::Color32::BLACK);
+            }
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            self.view = view;
+        }
+        ui.add_space(2.0);
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
-            let (dot, text) = match (&self.engine, &self.engine_error) {
+            let (color, text) = match (&self.engine, &self.engine_error) {
                 (Some(e), _) => (GREEN, format!("Capturing on {}", e.local_addr())),
                 (None, Some(err)) => (RED, format!("Error: {err}")),
                 (None, None) => (TEXT_FAINT, "Idle".to_string()),
             };
-            ui.label(RichText::new("•").size(18.0).color(dot));
-            ui.label(RichText::new(text).size(12.0).color(TEXT_DIM));
-            ui.separator();
+            dot(ui, color, 3.0);
+            ui.label(RichText::new(text).size(11.5).color(TEXT_DIM));
+            ui.label(RichText::new("·").color(TEXT_FAINT));
             ui.label(
                 RichText::new(format!("{} exchanges", self.exchanges.len()))
-                    .size(12.0)
+                    .size(11.5)
                     .color(TEXT_DIM),
             );
-            ui.separator();
+            ui.label(RichText::new("·").color(TEXT_FAINT));
             let active = self.rules.iter().filter(|r| r.enabled).count();
             ui.label(
                 RichText::new(format!("{active} active rules"))
-                    .size(12.0)
+                    .size(11.5)
                     .color(if self.rules_error.is_some() {
                         RED
                     } else {
@@ -537,18 +679,24 @@ impl FluxApp {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(250));
         egui::Area::new(egui::Id::unique("fluxrs_toasts"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -40.0))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-18.0, -42.0))
             .order(egui::Order::Foreground)
             .show(ui.ctx(), |ui| {
                 for t in &self.toasts {
                     egui::Frame::new()
-                        .fill(SURFACE_HI)
-                        .stroke(Stroke::new(1.0, t.color.gamma_multiply(0.6)))
+                        .fill(RAISED)
+                        .stroke(Stroke::new(1.0, BORDER_STRONG))
                         .corner_radius(egui::CornerRadius::from(10u8))
                         .inner_margin(Margin::symmetric(14, 10))
+                        .shadow(egui::Shadow {
+                            offset: [0, 6],
+                            blur: 18,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(120),
+                        })
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("•").size(18.0).color(t.color));
+                                dot(ui, t.color, 4.0);
                                 ui.label(&t.text);
                             });
                         });
@@ -562,37 +710,42 @@ impl eframe::App for FluxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
 
-        egui::Panel::top("top_bar")
+        egui::Panel::left("sidebar")
+            .resizable(false)
+            .exact_size(224.0)
             .frame(
                 egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(Margin::symmetric(14, 10))
+                    .fill(SIDEBAR)
+                    .inner_margin(Margin::symmetric(10, 0))
                     .stroke(Stroke::new(1.0, BORDER)),
             )
-            .show(ui, |ui| self.top_bar(ui));
+            .show(ui, |ui| self.sidebar(ui));
 
-        egui::Panel::bottom("status_bar")
+        egui::Panel::top("header")
             .frame(
                 egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(Margin::symmetric(14, 5))
+                    .fill(BG)
+                    .inner_margin(Margin::symmetric(20, 12))
+                    .stroke(Stroke::new(1.0, BORDER)),
+            )
+            .show(ui, |ui| self.header(ui));
+
+        egui::Panel::bottom("status_bar")
+            .exact_size(28.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(SIDEBAR)
+                    .inner_margin(Margin::symmetric(16, 0))
                     .stroke(Stroke::new(1.0, BORDER)),
             )
             .show(ui, |ui| self.status_bar(ui));
 
-        egui::Panel::left("nav")
-            .resizable(false)
-            .exact_size(210.0)
+        egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
-                    .fill(PANEL)
-                    .inner_margin(Margin::symmetric(10, 4))
-                    .stroke(Stroke::new(1.0, BORDER)),
+                    .fill(BG)
+                    .inner_margin(Margin::symmetric(20, 16)),
             )
-            .show(ui, |ui| self.nav(ui));
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(Margin::same(14)))
             .show(ui, |ui| match self.view {
                 View::Traffic => views::traffic::show(self, ui),
                 View::Intercept => views::intercept::show(self, ui),

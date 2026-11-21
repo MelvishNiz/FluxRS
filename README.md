@@ -10,7 +10,7 @@ ideas of [fluxzy.core](https://github.com/haga-rak/fluxzy.core):
 on-the-fly certificates, filters and actions, breakpoints, and transparent
 capture.
 
-![Traffic view](docs/traffic.png)
+![Traffic view with HTTPS details](docs/traffic.png)
 
 ## Features
 
@@ -21,8 +21,10 @@ capture.
 | **HTTPS decryption** | Local root CA (ECDSA P-256) with leaf certificates generated per host and cached. One-click install into the Windows trust store. Host bypass list for certificate-pinned apps. |
 | **Intercept (breakpoints)** | Pause requests and/or responses that match a filter, edit them as raw HTTP text, then forward, forward unchanged, or drop. |
 | **Rewrite rules** | Filters (URL / host / path / method / header × contains / equals / starts / ends / regex, NOT, case) + actions: set/remove headers, method, path regex rewrite, redirect to another host, replace or find/replace bodies (gzip/br/deflate are decoded first), status, mock response, block, delay. Changes apply live. |
+| **HTTPS inspector** | TLS version and cipher for both legs (client ⇄ FluxRS, FluxRS ⇄ server), SNI/ALPN, and the real server certificate (subject, issuer, validity, SANs). The app checks whether the root CA is trusted and offers a one-click install. |
 | **Inspector** | Request/response headers, decoded and pretty-printed bodies, hex view for binary bodies, timings, copy as cURL, create a rule from an exchange. WebSocket upgrades are tunneled. |
 
+![Inspector](docs/inspector.png)
 ![Intercept](docs/intercept.png)
 ![Rules](docs/rules.png)
 
@@ -102,6 +104,11 @@ crates/fluxrs-app    egui/eframe desktop UI (dark theme)
 * **Build** (`build.yml`) is started manually from the Actions tab
   (*Run workflow*). It tests, builds the release exe, downloads WinDivert
   (SHA-256 checked) and uploads a ready-to-run package.
+
+## Fonts and icons
+
+The UI embeds Inter and JetBrains Mono (SIL OFL 1.1) and a subset of Lucide icons
+(ISC). Their licenses are in `crates/fluxrs-app/assets/fonts/`.
 
 ## License
 

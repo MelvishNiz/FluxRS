@@ -278,6 +278,8 @@ struct ConnCtx {
     port: u16,
     /// Original destination IP (proxyless).
     ip: Option<IpAddr>,
+    /// Client side TLS session (decrypted connections).
+    tls: Option<crate::model::TlsInfo>,
 }
 
 async fn handle_connection(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr) {
@@ -290,6 +292,7 @@ async fn handle_connection(shared: Arc<Shared>, stream: TcpStream, peer: SocketA
                 host: None,
                 port: 80,
                 ip: None,
+                tls: None,
             };
             serve_http(shared.clone(), Box::new(stream), ctx).await;
         }
@@ -356,6 +359,7 @@ async fn handle_inner(
                 host: host_hint.or_else(|| ip.map(|i| i.to_string())),
                 port,
                 ip,
+                tls: None,
             };
             serve_http(shared, Box::new(Rewind::new(prefix, io)), ctx).await;
         }
@@ -399,6 +403,8 @@ async fn handle_inner(
                 }
                 Err(_) => return,
             };
+            let tls_info =
+                crate::tlsinfo::from_server_conn(tls_stream.get_ref().1, Some(host.clone()));
             let ctx = ConnCtx {
                 client,
                 explicit: false,
@@ -406,6 +412,7 @@ async fn handle_inner(
                 host: Some(host),
                 port,
                 ip,
+                tls: Some(tls_info),
             };
             serve_http(shared, Box::new(tls_stream), ctx).await;
         }
@@ -447,7 +454,7 @@ async fn tunnel<S>(
         ip,
     };
     match connect_upstream(&shared, &target).await {
-        Ok(mut up) => {
+        Ok((mut up, _)) => {
             let res = tokio::io::copy_bidirectional(&mut client_io, &mut up).await;
             ex.state = ExchangeState::Completed;
             if let Ok((a, b)) = res {
@@ -480,6 +487,7 @@ fn new_exchange(client: Option<SocketAddr>, request: RequestData) -> Exchange {
         applied_rules: vec![],
         intercepted: false,
         upgraded: false,
+        tls: None,
     }
 }
 
@@ -491,7 +499,9 @@ struct Target {
     ip: Option<IpAddr>,
 }
 
-async fn connect_upstream(shared: &Arc<Shared>, target: &Target) -> Result<BoxIo, String> {
+type Upstream = (BoxIo, Option<crate::tlsinfo::UpstreamTls>);
+
+async fn connect_upstream(shared: &Arc<Shared>, target: &Target) -> Result<Upstream, String> {
     let addrs: Vec<SocketAddr> = match target.ip {
         Some(ip) => vec![SocketAddr::new(ip, target.port)],
         None => {
@@ -520,7 +530,7 @@ async fn connect_upstream(shared: &Arc<Shared>, target: &Target) -> Result<BoxIo
         match connect_one(shared, addr).await {
             Ok(io) => {
                 if !target.tls {
-                    return Ok(io);
+                    return Ok((io, None));
                 }
                 let name = tls::server_name(&target.host)?;
                 let connector = tokio_rustls::TlsConnector::from(shared.tls_client.clone());
@@ -530,7 +540,10 @@ async fn connect_upstream(shared: &Arc<Shared>, target: &Target) -> Result<BoxIo
                 )
                 .await
                 {
-                    Ok(Ok(s)) => Ok(Box::new(s)),
+                    Ok(Ok(s)) => {
+                        let info = crate::tlsinfo::from_client_conn(s.get_ref().1);
+                        Ok((Box::new(s), Some(info)))
+                    }
                     Ok(Err(e)) => Err(format!("upstream TLS error ({}): {e}", target.host)),
                     Err(_) => Err(format!("upstream TLS timeout ({})", target.host)),
                 };
@@ -572,6 +585,7 @@ async fn connect_one(shared: &Arc<Shared>, addr: SocketAddr) -> Result<BoxIo, St
 struct UpstreamConn {
     target: Target,
     sender: hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    tls: Option<crate::tlsinfo::UpstreamTls>,
 }
 
 fn serve_http(
@@ -796,6 +810,7 @@ async fn handle_request(
     rules::remove_header(&mut rd.headers, "proxy-authorization");
 
     let mut ex = new_exchange(Some(ctx.client), rd.clone());
+    ex.tls = ctx.tls.clone();
     let mut ip = ip;
 
     // Rules (request phase).
@@ -964,7 +979,10 @@ async fn handle_request(
     }
 
     let resp = match send_upstream(&shared, &upstream, &target, &make_req).await {
-        Ok(r) => r,
+        Ok((r, up_tls)) => {
+            ex.tls = crate::tlsinfo::merge(ctx.tls.as_ref(), up_tls.as_ref());
+            r
+        }
         Err(e) => return Ok(fail(&shared, &mut ex, started, &e)),
     };
     ex.ttfb_ms = Some(started.elapsed().as_millis() as u64);
@@ -1141,15 +1159,16 @@ async fn send_upstream(
     slot: &AsyncMutex<Option<UpstreamConn>>,
     target: &Target,
     make_req: &(dyn Fn() -> Result<Request<Full<Bytes>>, String> + Sync),
-) -> Result<Response<Incoming>, String> {
+) -> Result<(Response<Incoming>, Option<crate::tlsinfo::UpstreamTls>), String> {
     let mut slot = slot.lock().await;
     // Try a reused connection first.
     if let Some(mut conn) = slot.take() {
         if conn.target == *target && conn.sender.ready().await.is_ok() {
             match conn.sender.send_request(make_req()?).await {
                 Ok(resp) => {
+                    let tls = conn.tls.clone();
                     *slot = Some(conn);
-                    return Ok(resp);
+                    return Ok((resp, tls));
                 }
                 Err(e) if !e.is_canceled() && !e.is_closed() && !e.is_incomplete_message() => {
                     return Err(format!("upstream error: {e}"));
@@ -1158,7 +1177,7 @@ async fn send_upstream(
             }
         }
     }
-    let io = connect_upstream(shared, target).await?;
+    let (io, tls) = connect_upstream(shared, target).await?;
     let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
         .handshake::<_, Full<Bytes>>(TokioIo::new(io))
         .await
@@ -1173,8 +1192,9 @@ async fn send_upstream(
     *slot = Some(UpstreamConn {
         target: target.clone(),
         sender,
+        tls: tls.clone(),
     });
-    Ok(resp)
+    Ok((resp, tls))
 }
 
 async fn handle_upgrade(
@@ -1186,7 +1206,10 @@ async fn handle_upgrade(
     client_upgrade: hyper::upgrade::OnUpgrade,
 ) -> Response<ProxyBody> {
     let io = match connect_upstream(&shared, &target).await {
-        Ok(io) => io,
+        Ok((io, tls)) => {
+            ex.tls = crate::tlsinfo::merge(ex.tls.as_ref(), tls.as_ref());
+            io
+        }
         Err(e) => return fail(&shared, &mut ex, started, &e),
     };
     let (mut sender, conn) = match hyper::client::conn::http1::Builder::new()

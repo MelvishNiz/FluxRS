@@ -1,7 +1,7 @@
 //! Rewrite rules editor.
 
 use crate::app::FluxApp;
-use crate::theme::*;
+use crate::theme::{icon, *};
 use eframe::egui::{self, Margin, RichText};
 use fluxrs_core::{Action, Filter, FilterField, MatchOp, Rule};
 
@@ -11,34 +11,25 @@ pub struct RulesState {
 }
 
 pub fn show(app: &mut FluxApp, ui: &mut egui::Ui) {
-    section_title(
-        ui,
-        "Rewrite rules",
-        "Rules run top to bottom on every exchange whose filters all match. Changes apply instantly.",
-    );
-    if let Some(err) = &app.rules_error {
-        egui::Frame::new()
-            .fill(RED.gamma_multiply(0.12))
-            .stroke(egui::Stroke::new(1.0, RED.gamma_multiply(0.5)))
-            .corner_radius(egui::CornerRadius::from(8u8))
-            .inner_margin(Margin::same(8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(
-                    RichText::new(format!("⚠ {err} — rules are not applied until fixed"))
-                        .color(RED),
-                );
-            });
-        ui.add_space(8.0);
+    if let Some(err) = app.rules_error.clone() {
+        banner(
+            ui,
+            RED,
+            icon::CIRCLE_ALERT,
+            &format!("{err} — rules are not applied until fixed"),
+            None,
+        );
+        ui.add_space(10.0);
     }
 
     egui::Panel::left("rule_list")
         .resizable(true)
         .default_size(300.0)
         .size_range(220.0..=480.0)
+        .show_separator_line(false)
         .frame(egui::Frame::new().inner_margin(Margin {
             left: 0,
-            right: 10,
+            right: 12,
             top: 0,
             bottom: 0,
         }))
@@ -53,7 +44,7 @@ pub fn show(app: &mut FluxApp, ui: &mut egui::Ui) {
                     ui.set_min_size(ui.available_size());
                     ui.vertical_centered(|ui| {
                         ui.add_space(ui.available_height() * 0.3);
-                        ui.label(RichText::new("✏").size(36.0).color(TEXT_FAINT));
+                        ui.label(ico(icon::WAND, 30.0, TEXT_FAINT));
                         ui.label(
                             RichText::new("Select a rule or create a new one").color(TEXT_DIM),
                         );
@@ -66,11 +57,14 @@ pub fn show(app: &mut FluxApp, ui: &mut egui::Ui) {
 fn rule_list(app: &mut FluxApp, ui: &mut egui::Ui) {
     let mut changed = false;
     ui.horizontal(|ui| {
-        if primary_button(ui, "+ New rule", ACCENT).clicked() {
-            app.rules.push(Rule::default());
-            app.rules_ui.selected = Some(app.rules.len() - 1);
-            changed = true;
-        }
+        caption(ui, &format!("{} rules", app.rules.len()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if primary_button(ui, icon::PLUS, "New rule", ACCENT).clicked() {
+                app.rules.push(Rule::default());
+                app.rules_ui.selected = Some(app.rules.len() - 1);
+                changed = true;
+            }
+        });
     });
     ui.add_space(8.0);
     let mut action: Option<(usize, &'static str)> = None;
@@ -82,13 +76,13 @@ fn rule_list(app: &mut FluxApp, ui: &mut egui::Ui) {
                 let selected = app.rules_ui.selected == Some(i);
                 let rule = &mut app.rules[i];
                 let resp = egui::Frame::new()
-                    .fill(if selected { ACCENT_SOFT } else { SURFACE })
+                    .fill(if selected { RAISED } else { SURFACE })
                     .stroke(egui::Stroke::new(
                         1.0,
                         if selected { ACCENT } else { BORDER },
                     ))
                     .corner_radius(egui::CornerRadius::from(10u8))
-                    .inner_margin(Margin::same(10))
+                    .inner_margin(Margin::same(12))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
@@ -96,13 +90,11 @@ fn rule_list(app: &mut FluxApp, ui: &mut egui::Ui) {
                                 changed = true;
                             }
                             ui.add(
-                                egui::Label::new(
-                                    RichText::new(&rule.name).strong().color(if rule.enabled {
-                                        TEXT
-                                    } else {
-                                        TEXT_DIM
-                                    }),
-                                )
+                                egui::Label::new(strong(
+                                    &rule.name,
+                                    13.0,
+                                    if rule.enabled { TEXT } else { TEXT_DIM },
+                                ))
                                 .truncate(),
                             );
                         });
@@ -120,26 +112,20 @@ fn rule_list(app: &mut FluxApp, ui: &mut egui::Ui) {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui.small_button("🗑").on_hover_text("Delete").clicked()
-                                        {
+                                        if icon_button(ui, icon::TRASH, "Delete").clicked() {
                                             action = Some((i, "delete"));
                                         }
-                                        if ui.small_button("🗐").on_hover_text("Duplicate").clicked()
-                                        {
+                                        if icon_button(ui, icon::COPY_PLUS, "Duplicate").clicked() {
                                             action = Some((i, "dup"));
                                         }
                                         if i + 1 < n
-                                            && ui
-                                                .small_button("⏷")
-                                                .on_hover_text("Move down")
+                                            && icon_button(ui, icon::CHEVRON_DOWN, "Move down")
                                                 .clicked()
                                         {
                                             action = Some((i, "down"));
                                         }
                                         if i > 0
-                                            && ui
-                                                .small_button("⏶")
-                                                .on_hover_text("Move up")
+                                            && icon_button(ui, icon::CHEVRON_UP, "Move up")
                                                 .clicked()
                                         {
                                             action = Some((i, "up"));
@@ -404,7 +390,7 @@ fn rule_editor(app: &mut FluxApp, ui: &mut egui::Ui, idx: usize) {
                     changed |= ui
                         .add(
                             egui::TextEdit::singleline(&mut rule.name)
-                                .font(egui::TextStyle::Heading)
+                                .font(sb(18.0))
                                 .frame(egui::Frame::NONE)
                                 .desired_width(f32::INFINITY),
                         )
@@ -413,22 +399,13 @@ fn rule_editor(app: &mut FluxApp, ui: &mut egui::Ui, idx: usize) {
                 ui.add_space(12.0);
 
                 // Filters
-                ui.label(
-                    RichText::new("WHEN ALL FILTERS MATCH")
-                        .size(11.0)
-                        .color(TEXT_FAINT)
-                        .strong(),
-                );
+                caption(ui, "When all filters match");
                 ui.add_space(4.0);
                 let mut remove_filter = None;
                 for (i, f) in rule.filters.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         changed |= filter_editor(ui, ("rule_filter", idx, i), f);
-                        if ui
-                            .small_button("✖")
-                            .on_hover_text("Remove filter")
-                            .clicked()
-                        {
+                        if icon_button(ui, icon::X, "Remove filter").clicked() {
                             remove_filter = Some(i);
                         }
                     });
@@ -444,26 +421,21 @@ fn rule_editor(app: &mut FluxApp, ui: &mut egui::Ui, idx: usize) {
                             .size(12.0),
                     );
                 }
-                if ui.button("+ Add filter").clicked() {
+                if ghost_button(ui, icon::PLUS, "Add filter").clicked() {
                     rule.filters.push(Filter::default());
                     changed = true;
                 }
 
                 ui.add_space(16.0);
-                ui.label(
-                    RichText::new("THEN APPLY ACTIONS")
-                        .size(11.0)
-                        .color(TEXT_FAINT)
-                        .strong(),
-                );
+                caption(ui, "Then apply actions");
                 ui.add_space(4.0);
                 let mut remove_action = None;
                 for (i, a) in rule.actions.iter_mut().enumerate() {
                     egui::Frame::new()
-                        .fill(BG)
+                        .fill(CODE_BG)
                         .stroke(egui::Stroke::new(1.0, BORDER))
                         .corner_radius(egui::CornerRadius::from(10u8))
-                        .inner_margin(Margin::same(10))
+                        .inner_margin(Margin::same(12))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal(|ui| {
@@ -472,11 +444,7 @@ fn rule_editor(app: &mut FluxApp, ui: &mut egui::Ui, idx: usize) {
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
-                                        if ui
-                                            .small_button("✖")
-                                            .on_hover_text("Remove action")
-                                            .clicked()
-                                        {
+                                        if icon_button(ui, icon::TRASH, "Remove action").clicked() {
                                             remove_action = Some(i);
                                         }
                                     },
@@ -493,15 +461,18 @@ fn rule_editor(app: &mut FluxApp, ui: &mut egui::Ui, idx: usize) {
                     rule.actions.remove(i);
                     changed = true;
                 }
-                ui.menu_button("+ Add action", |ui| {
-                    for t in Action::templates() {
-                        if ui.button(t.kind_label()).clicked() {
-                            rule.actions.push(t);
-                            changed = true;
-                            ui.close();
+                ui.menu_button(
+                    (ico(icon::PLUS, 14.0, TEXT_DIM), RichText::new("Add action")),
+                    |ui| {
+                        for t in Action::templates() {
+                            if ui.button(t.kind_label()).clicked() {
+                                rule.actions.push(t);
+                                changed = true;
+                                ui.close();
+                            }
                         }
-                    }
-                });
+                    },
+                );
             });
     });
     if changed {

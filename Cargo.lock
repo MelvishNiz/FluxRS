@@ -1238,6 +1238,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]

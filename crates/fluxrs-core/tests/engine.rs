@@ -454,6 +454,12 @@ fn https_connect_mitm_with_trusted_ca() {
     assert_eq!(ex.request.scheme, "https");
     assert_eq!(ex.request.host, "localhost");
     assert!(ex.request.url().starts_with("https://localhost:"));
+    let tls = ex.tls.as_ref().expect("tls info recorded");
+    assert_eq!(tls.sni.as_deref(), Some("localhost"));
+    assert!(tls.client_version.as_deref().unwrap().starts_with("TLS 1."));
+    assert!(tls.server_version.is_some());
+    let cert = tls.server_cert.as_ref().expect("server certificate");
+    assert_eq!(cert.san, vec!["localhost".to_string()]);
     drop(rt);
 }
 
