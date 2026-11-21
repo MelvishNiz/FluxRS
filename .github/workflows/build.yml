@@ -1,0 +1,66 @@
+name: Build
+
+# Release build of the Windows app. Manual trigger only.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label used in the package name"
+        required: false
+        default: "dev"
+
+env:
+  CARGO_TERM_COLOR: always
+  WINDIVERT_VERSION: "2.2.2"
+  WINDIVERT_SHA256: "63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15"
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build release
+        run: cargo build --release --locked -p fluxrs-app --target x86_64-pc-windows-msvc
+
+      - name: Download WinDivert
+        shell: pwsh
+        run: |
+          $zip = "WinDivert.zip"
+          $url = "https://github.com/basil00/WinDivert/releases/download/v$env:WINDIVERT_VERSION/WinDivert-$env:WINDIVERT_VERSION-A.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:WINDIVERT_SHA256) { throw "WinDivert checksum mismatch: $hash" }
+          Expand-Archive $zip -DestinationPath windivert
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "FluxRS-${{ inputs.version }}-windows-x64"
+          $out = "dist/$name"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $wd = "windivert/WinDivert-$env:WINDIVERT_VERSION-A"
+          Copy-Item target/x86_64-pc-windows-msvc/release/fluxrs.exe $out/
+          Copy-Item "$wd/x64/WinDivert.dll" $out/
+          Copy-Item "$wd/x64/WinDivert64.sys" $out/
+          Copy-Item "$wd/LICENSE" "$out/WinDivert-LICENSE.txt"
+          Copy-Item README.md, LICENSE $out/
+          "PACKAGE=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: dist/${{ env.PACKAGE }}/
+          if-no-files-found: error

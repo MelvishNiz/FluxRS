@@ -1,0 +1,20 @@
+FluxRS - proxyless HTTP debugger written in Rust
+
+Copyright (c) 2026 FluxRS contributors.
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the
+Free Software Foundation, version 3 of the License, see
+https://www.gnu.org/licenses/gpl-3.0.html.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+The capture engine (crates/fluxrs-core) is an independent Rust
+implementation whose design follows Fluxzy.Core
+(https://github.com/haga-rak/fluxzy.core, GPLv3).
+
+Release packages ship WinDivert (https://github.com/basil00/WinDivert),
+which is dual licensed under LGPLv3 / GPLv2; its license file is included
+in the package as WinDivert-LICENSE.txt.
