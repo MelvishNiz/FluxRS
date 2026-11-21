@@ -1,11 +1,11 @@
 name: Build
 
-# Release build of the Windows app. Manual trigger only.
+# Release builds. Manual trigger only (Actions -> Build -> Run workflow).
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version label used in the package name"
+        description: "Version label used in the package names"
         required: false
         default: "dev"
 
@@ -15,16 +15,14 @@ env:
   WINDIVERT_SHA256: "63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15"
 
 jobs:
-  build-windows:
-    name: Build Windows x64
+  windows:
+    name: Windows 10/11 x64
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
 
       - uses: Swatinem/rust-cache@v2
 
@@ -36,13 +34,7 @@ jobs:
 
       - name: Download WinDivert
         shell: pwsh
-        run: |
-          $zip = "WinDivert.zip"
-          $url = "https://github.com/basil00/WinDivert/releases/download/v$env:WINDIVERT_VERSION/WinDivert-$env:WINDIVERT_VERSION-A.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne $env:WINDIVERT_SHA256) { throw "WinDivert checksum mismatch: $hash" }
-          Expand-Archive $zip -DestinationPath windivert
+        run: ./.github/scripts/windivert.ps1
 
       - name: Package
         shell: pwsh
@@ -58,9 +50,92 @@ jobs:
           Copy-Item README.md, LICENSE $out/
           "PACKAGE=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PACKAGE }}
           path: dist/${{ env.PACKAGE }}/
+          if-no-files-found: error
+
+  # Windows 7 SP1 is not supported by stable Rust (minimum is Windows 10).
+  # The tier-3 target x86_64-win7-windows-msvc needs nightly + build-std.
+  windows7:
+    name: Windows 7 x64 (experimental)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Build release
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: cargo +nightly build --release --locked -p fluxrs-app -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc
+
+      - name: Download WinDivert
+        shell: pwsh
+        run: ./.github/scripts/windivert.ps1
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "FluxRS-${{ inputs.version }}-windows7-x64-experimental"
+          $out = "dist/$name"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $wd = "windivert/WinDivert-$env:WINDIVERT_VERSION-A"
+          Copy-Item target/x86_64-win7-windows-msvc/release/fluxrs.exe $out/
+          Copy-Item "$wd/x64/WinDivert.dll" $out/
+          Copy-Item "$wd/x64/WinDivert64.sys" $out/
+          Copy-Item "$wd/LICENSE" "$out/WinDivert-LICENSE.txt"
+          Copy-Item README.md, LICENSE $out/
+          "PACKAGE=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: dist/${{ env.PACKAGE }}/
+          if-no-files-found: error
+
+  linux:
+    name: Linux x64 (.deb + tar.gz)
+    # Oldest supported runner = widest glibc compatibility (Ubuntu 22.04+).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build release
+        run: cargo build --release --locked -p fluxrs-app
+
+      - name: Build .deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p fluxrs-app --no-build --deb-version "0.1.0-${{ inputs.version }}"
+
+      - name: Package
+        run: |
+          name="FluxRS-${{ inputs.version }}-linux-x64"
+          mkdir -p "dist/$name"
+          cp target/release/fluxrs README.md LICENSE "dist/$name/"
+          cp crates/fluxrs-app/assets/linux/fluxrs.desktop crates/fluxrs-app/assets/linux/fluxrs.png "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cp target/debian/*.deb dist/
+          echo "PACKAGE=$name" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE }}
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
           if-no-files-found: error

@@ -479,7 +479,7 @@ impl FluxApp {
         }
 
         // Bottom: HTTPS + capture status.
-        let space = ui.available_height() - 132.0;
+        let space = ui.available_height() - 156.0;
         if space > 0.0 {
             ui.add_space(space);
         }

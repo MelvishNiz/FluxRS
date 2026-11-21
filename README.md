@@ -1,4 +1,4 @@
-# FluxRS — proxyless HTTP debugger for Windows
+# FluxRS — proxyless HTTP debugger for Windows and Linux
 
 FluxRS is an HTTP/HTTPS debugger written in Rust, both the engine and the
 GUI. It can capture traffic **without any proxy configuration**: on
@@ -28,6 +28,20 @@ capture.
 ![Intercept](docs/intercept.png)
 ![Rules](docs/rules.png)
 
+## Platforms
+
+| Platform | Explicit proxy | Proxyless capture | HTTPS CA install | Package |
+|---|---|---|---|---|
+| Windows 10 / 11 x64 | yes | WinDivert (Administrator) | Windows trust store | zip |
+| Ubuntu 22.04+ (and other Linux desktops) | yes | iptables `REDIRECT` (asks for admin through pkexec) | system store + Chrome NSS | `.deb`, tar.gz |
+| Windows 7 SP1 x64 | experimental | experimental (WinDivert 2.2 supports Win7) | Windows trust store | zip (`windows7-experimental`) |
+
+Windows 7: stable Rust supports Windows 10 and later only. The Windows 7 build
+uses the tier-3 target `x86_64-win7-windows-msvc` (nightly, `build-std`). It is
+built by the Build workflow but has not been tested on a Windows 7 machine.
+Windows 7 also needs the SHA-2 code-signing update (KB4474419) to load WinDivert,
+and an OpenGL 2 capable GPU driver.
+
 ## Download and run (Windows)
 
 1. Download the `FluxRS-…-windows-x64` artifact from the **Build** workflow
@@ -35,17 +49,43 @@ capture.
 2. Keep `fluxrs.exe`, `WinDivert.dll` and `WinDivert64.sys` in the same folder.
 3. Start `fluxrs.exe`. It asks for Administrator rights, which loading the
    WinDivert driver requires.
-4. **Settings → Install in Windows trust store** installs the root CA once.
+4. **Settings → Install certificate** adds the root CA to the Windows trust store once.
    Firefox uses its own store: import `fluxrs-root-ca.crt` there or enable
    `security.enterprise_roots.enabled`.
 5. Press **Start capture**.
 
-Data (CA, `settings.json`, `rules.json`) lives in `%APPDATA%\FluxRS`.
+Data (CA, `settings.json`, `rules.json`) lives in `%APPDATA%\FluxRS` on Windows and
+`~/.local/share/FluxRS` on Linux.
 
 Command-line flags: `--start` starts capturing at launch;
 `--view traffic|intercept|rules|settings|logs` opens that page.
 
-### Limitations
+## Download and run (Ubuntu / Linux)
+
+1. Download the `FluxRS-…-linux-x64` artifact from the **Build** workflow.
+2. Install the package and start FluxRS from the app menu:
+   ```bash
+   sudo apt install ./fluxrs_*.deb
+   ```
+3. **Settings → Install certificate** copies the root CA to
+   `/usr/local/share/ca-certificates`, runs `update-ca-certificates` (password
+   prompt) and adds it to Chrome's NSS store when `libnss3-tools` is installed.
+   Firefox: import the file under Settings › Certificates.
+4. Choose **Proxyless** and press **Start capture**. FluxRS asks for the admin
+   password once to add iptables rules, and once more to remove them on stop.
+
+Proxyless on Linux redirects outgoing TCP 80/443 (IPv4) to FluxRS with
+iptables. FluxRS reads the real destination with `SO_ORIGINAL_DST`, and its own
+upstream connections use source ports 61000–61999, which the rules skip. The
+rules sit in their own chains (`FLUXRS`, `FLUXRS_FILTER`) and are removed on
+stop, on Ctrl+C or `kill`, and after a crash. If a session is killed with
+`kill -9` or the machine loses power, remove them with:
+
+```bash
+fluxrs --cleanup
+```
+
+## Limitations
 
 * Only HTTP/1.1 is used between clients and FluxRS (ALPN offers only
   `http/1.1`). HTTP/2 and HTTP/3 are not decoded.
@@ -56,7 +96,7 @@ Command-line flags: `--start` starts capturing at launch;
 * WinDivert needs a 64-bit Windows that can load signed kernel drivers.
   Some anti-cheat and security tools block it.
 
-## How proxyless capture works
+## How proxyless capture works (Windows)
 
 ```
 app A:p ──SYN──▶ S:443          (outbound, captured by WinDivert)

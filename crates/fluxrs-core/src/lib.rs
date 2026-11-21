@@ -16,6 +16,7 @@ pub mod intercept;
 pub mod io;
 pub mod model;
 pub mod nat;
+pub mod netfilter;
 pub mod rawhttp;
 pub mod rules;
 pub mod tls;

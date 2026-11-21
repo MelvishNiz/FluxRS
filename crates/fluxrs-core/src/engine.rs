@@ -112,8 +112,17 @@ struct Shared {
     interceptor: Interceptor,
     sink: EventSink,
     tls_client: Arc<rustls::ClientConfig>,
+    /// Windows proxyless (WinDivert reflection table).
     nat: Option<Arc<NatTable>>,
+    /// Linux proxyless (iptables REDIRECT).
+    netfilter: bool,
     local_port: u16,
+}
+
+impl Shared {
+    fn transparent(&self) -> bool {
+        self.nat.is_some() || self.netfilter
+    }
 }
 
 impl Shared {
@@ -139,6 +148,8 @@ pub struct Engine {
     sink: EventSink,
     #[cfg(windows)]
     redirector: Option<crate::divert::Redirector>,
+    #[cfg(target_os = "linux")]
+    netfilter: Option<crate::netfilter::Redirect>,
 }
 
 impl Engine {
@@ -149,8 +160,22 @@ impl Engine {
         interceptor: Interceptor,
         sink: EventSink,
     ) -> Result<Engine, String> {
-        if config.mode == CaptureMode::Proxyless && !cfg!(windows) {
-            return Err("Proxyless capture requires Windows (WinDivert)".into());
+        Self::start_with(config, ca, rules, interceptor, sink, None)
+    }
+
+    /// Like [`Engine::start`]; `only_dest` limits Linux proxyless capture to
+    /// one destination address (integration tests).
+    #[doc(hidden)]
+    pub fn start_with(
+        config: EngineConfig,
+        ca: Arc<CertificateAuthority>,
+        rules: RulesHandle,
+        interceptor: Interceptor,
+        sink: EventSink,
+        only_dest: Option<&str>,
+    ) -> Result<Engine, String> {
+        if config.mode == CaptureMode::Proxyless && !cfg!(any(windows, target_os = "linux")) {
+            return Err("Proxyless capture is supported on Windows and Linux".into());
         }
         if config.mode == CaptureMode::Proxyless && (config.port == 80 || config.port == 443) {
             return Err("Proxy port must not be 80 or 443 in proxyless mode".into());
@@ -163,6 +188,8 @@ impl Engine {
             .map_err(|e| format!("runtime: {e}"))?;
 
         let ip: IpAddr = match config.mode {
+            // iptables REDIRECT of local traffic lands on 127.0.0.1
+            CaptureMode::Proxyless if cfg!(target_os = "linux") => IpAddr::from([127, 0, 0, 1]),
             CaptureMode::Proxyless => IpAddr::from([0, 0, 0, 0]),
             CaptureMode::Proxy if config.listen_any => IpAddr::from([0, 0, 0, 0]),
             CaptureMode::Proxy => IpAddr::from([127, 0, 0, 1]),
@@ -172,8 +199,10 @@ impl Engine {
             .map_err(|e| format!("cannot listen on port {}: {e}", config.port))?;
         let local_addr = listener.local_addr().map_err(|e| e.to_string())?;
 
-        let nat = (config.mode == CaptureMode::Proxyless)
-            .then(|| NatTable::new(local_addr.port(), vec![80, 443]));
+        let proxyless = config.mode == CaptureMode::Proxyless;
+        let nat =
+            (proxyless && cfg!(windows)).then(|| NatTable::new(local_addr.port(), vec![80, 443]));
+        let netfilter = proxyless && cfg!(target_os = "linux");
 
         let shared = Arc::new(Shared {
             tls_client: tls::client_config(ca.provider(), config.insecure_upstream),
@@ -183,6 +212,7 @@ impl Engine {
             interceptor,
             sink: sink.clone(),
             nat: nat.clone(),
+            netfilter,
             local_port: local_addr.port(),
         });
 
@@ -200,12 +230,24 @@ impl Engine {
         };
         #[cfg(not(windows))]
         let _ = &nat;
+        #[cfg(target_os = "linux")]
+        let netfilter_rules = if netfilter {
+            Some(crate::netfilter::Redirect::install(
+                local_addr.port(),
+                only_dest,
+            )?)
+        } else {
+            None
+        };
+        #[cfg(not(target_os = "linux"))]
+        let _ = (netfilter, only_dest);
 
         let (shutdown, rx) = watch::channel(false);
         runtime.spawn(accept_loop(listener, shared.clone(), rx));
         let mode = match shared.config.mode {
             CaptureMode::Proxy => "explicit proxy",
-            CaptureMode::Proxyless => "proxyless (WinDivert)",
+            CaptureMode::Proxyless if cfg!(windows) => "proxyless (WinDivert)",
+            CaptureMode::Proxyless => "proxyless (iptables)",
         };
         log(
             &sink,
@@ -219,6 +261,8 @@ impl Engine {
             sink,
             #[cfg(windows)]
             redirector,
+            #[cfg(target_os = "linux")]
+            netfilter: netfilter_rules,
         })
     }
 
@@ -230,6 +274,10 @@ impl Engine {
         #[cfg(windows)]
         if let Some(mut r) = self.redirector.take() {
             r.stop();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(mut r) = self.netfilter.take() {
+            r.remove();
         }
         let _ = self.shutdown.send(true);
         if let Some(rt) = self.runtime.take() {
@@ -283,6 +331,30 @@ struct ConnCtx {
 }
 
 async fn handle_connection(shared: Arc<Shared>, stream: TcpStream, peer: SocketAddr) {
+    #[cfg(target_os = "linux")]
+    if shared.netfilter {
+        let dst = match crate::netfilter::original_dst(&stream) {
+            Ok(d) => d,
+            Err(e) => {
+                log(
+                    &shared.sink,
+                    LogLevel::Warn,
+                    format!("no original destination for {peer}: {e}"),
+                );
+                return;
+            }
+        };
+        handle_inner(
+            shared,
+            Box::new(stream),
+            peer,
+            None,
+            Some(IpAddr::V4(*dst.ip())),
+            dst.port(),
+        )
+        .await;
+        return;
+    }
     match &shared.nat {
         None => {
             let ctx = ConnCtx {
@@ -518,7 +590,7 @@ async fn connect_upstream(shared: &Arc<Shared>, target: &Target) -> Result<Upstr
     };
     // Prefer IPv4 in proxyless mode (only IPv4 is excluded from redirect).
     let mut addrs = addrs;
-    if shared.nat.is_some() {
+    if shared.transparent() {
         addrs.sort_by_key(|a| !a.is_ipv4());
     }
     let mut last_err = format!("no address for {}", target.host);
@@ -554,32 +626,75 @@ async fn connect_upstream(shared: &Arc<Shared>, target: &Target) -> Result<Upstr
     Err(last_err)
 }
 
-async fn connect_one(shared: &Arc<Shared>, addr: SocketAddr) -> Result<BoxIo, String> {
-    let socket = if addr.is_ipv4() {
+fn new_socket(addr: &SocketAddr) -> Result<TcpSocket, String> {
+    if addr.is_ipv4() {
         TcpSocket::new_v4()
     } else {
         TcpSocket::new_v6()
     }
-    .map_err(|e| e.to_string())?;
-    let mut guard = None;
-    if let (Some(nat), true) = (&shared.nat, addr.is_ipv4()) {
-        // Bind first so the local port is known (and excluded from
-        // redirection) before the SYN leaves.
-        socket
-            .bind(SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 0))
-            .map_err(|e| e.to_string())?;
-        let port = socket.local_addr().map_err(|e| e.to_string())?.port();
-        guard = Some(nat.register_owned_port(port));
+    .map_err(|e| e.to_string())
+}
+
+static NEXT_OWN_PORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Linux proxyless: bind a source port from the range the iptables rules
+/// skip, so upstream connections are not redirected back to us.
+fn bind_own_port(addr: &SocketAddr) -> Result<TcpSocket, String> {
+    let range = crate::netfilter::OWN_PORTS;
+    let span = (*range.end() - *range.start()) as u32 + 1;
+    let any: IpAddr = if addr.is_ipv4() {
+        IpAddr::from([0, 0, 0, 0])
+    } else {
+        IpAddr::from([0u16; 8])
+    };
+    for _ in 0..span {
+        let n = NEXT_OWN_PORT.fetch_add(1, Ordering::Relaxed) % span;
+        let port = *range.start() + n as u16;
+        let socket = new_socket(addr)?;
+        let _ = socket.set_reuseaddr(true);
+        if socket.bind(SocketAddr::new(any, port)).is_ok() {
+            return Ok(socket);
+        }
     }
-    let stream = tokio::time::timeout(Duration::from_secs(10), socket.connect(addr))
-        .await
-        .map_err(|_| format!("connect timeout to {addr}"))?
-        .map_err(|e| format!("connect to {addr} failed: {e}"))?;
-    let _ = stream.set_nodelay(true);
-    Ok(Box::new(WithGuard {
-        inner: stream,
-        _guard: guard,
-    }))
+    Err("no free source port in the FluxRS range (61000-61999)".into())
+}
+
+async fn connect_one(shared: &Arc<Shared>, addr: SocketAddr) -> Result<BoxIo, String> {
+    let attempts = if shared.netfilter { 8 } else { 1 };
+    let mut last = String::new();
+    for _ in 0..attempts {
+        let socket = if shared.netfilter {
+            bind_own_port(&addr)?
+        } else {
+            new_socket(&addr)?
+        };
+        let mut guard = None;
+        if let (Some(nat), true) = (&shared.nat, addr.is_ipv4()) {
+            // Bind first so the local port is known (and excluded from
+            // redirection) before the SYN leaves.
+            socket
+                .bind(SocketAddr::new(IpAddr::from([0, 0, 0, 0]), 0))
+                .map_err(|e| e.to_string())?;
+            let port = socket.local_addr().map_err(|e| e.to_string())?.port();
+            guard = Some(nat.register_owned_port(port));
+        }
+        match tokio::time::timeout(Duration::from_secs(10), socket.connect(addr)).await {
+            Err(_) => return Err(format!("connect timeout to {addr}")),
+            Ok(Ok(stream)) => {
+                let _ = stream.set_nodelay(true);
+                return Ok(Box::new(WithGuard {
+                    inner: stream,
+                    _guard: guard,
+                }));
+            }
+            // Same 4-tuple still in use with a reused port: try another one.
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::AddrNotAvailable && shared.netfilter => {
+                last = format!("connect to {addr} failed: {e}");
+            }
+            Ok(Err(e)) => return Err(format!("connect to {addr} failed: {e}")),
+        }
+    }
+    Err(last)
 }
 
 struct UpstreamConn {

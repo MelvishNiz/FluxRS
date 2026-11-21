@@ -106,7 +106,7 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
             None => (
                 TEXT_DIM,
                 icon::CLOCK,
-                "Checking the Windows certificate store…",
+                "Checking the system certificate store…",
                 "",
             ),
         };
@@ -236,7 +236,7 @@ fn capture_card(app: &mut FluxApp, ui: &mut egui::Ui) {
             row(
                 ui,
                 "Capture mode",
-                "Proxyless captures every app via WinDivert (Windows, admin). Proxy needs client configuration.",
+                "Proxyless captures every app (WinDivert on Windows, iptables on Linux; needs admin rights). Proxy needs client configuration.",
                 |ui| {
                     changed |= segmented(
                         ui,
@@ -348,7 +348,7 @@ fn about_card(ui: &mut egui::Ui) {
                 });
                 ui.label(
                     RichText::new(
-                        "100% Rust HTTP debugger · engine modeled on fluxzy.core · proxyless capture via WinDivert",
+                        "100% Rust HTTP debugger · engine modeled on fluxzy.core · proxyless capture via WinDivert / iptables",
                     )
                     .size(12.0)
                     .color(TEXT_DIM),
@@ -360,7 +360,7 @@ fn about_card(ui: &mut egui::Ui) {
             ui.label(ico(icon::INFO, 12.0, TEXT_FAINT));
             ui.label(
                 RichText::new(
-                    "Proxyless needs Administrator and WinDivert.dll + WinDivert64.sys next to fluxrs.exe. QUIC (UDP 443) is blocked while capturing so browsers use HTTPS over TCP; IPv6 connections to ports 80/443 fall back to IPv4.",
+                    "Proxyless on Windows needs Administrator and WinDivert.dll + WinDivert64.sys next to fluxrs.exe; on Linux it adds iptables rules through pkexec and removes them on stop. QUIC (UDP 443) is blocked while capturing so browsers use HTTPS over TCP; IPv6 connections to ports 80/443 fall back to IPv4.",
                 )
                 .size(11.5)
                 .color(TEXT_FAINT),

@@ -239,11 +239,17 @@ impl CertificateAuthority {
 
     /// Is the root CA present in the OS trust store? (blocking, runs certutil)
     pub fn os_trust_status(&self) -> TrustStatus {
+        #[cfg(target_os = "linux")]
+        return linux::trust_status(&self.ca_pem);
+        #[cfg(not(target_os = "linux"))]
         os_trust_status(&self.serial_hex())
     }
 
     /// Install the root CA into the Windows trusted root store.
     pub fn install_in_os_store(&self) -> Result<String, CertError> {
+        #[cfg(target_os = "linux")]
+        return linux::install(&self.ca_cert_path());
+        #[cfg(not(target_os = "linux"))]
         install_root_ca(&self.ca_cert_path())
     }
 }
@@ -290,7 +296,7 @@ fn os_trust_status(serial: &str) -> TrustStatus {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn os_trust_status(_serial: &str) -> TrustStatus {
     TrustStatus::Unknown
 }
@@ -321,7 +327,68 @@ fn install_root_ca(path: &Path) -> Result<String, CertError> {
     )))
 }
 
-#[cfg(not(windows))]
+/// Ubuntu / Debian system store plus the NSS store used by Chrome.
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::{CertError, TrustStatus};
+    use std::path::Path;
+    use std::process::Command;
+
+    pub const SYSTEM_PATH: &str = "/usr/local/share/ca-certificates/fluxrs-root-ca.crt";
+    const NSS_NICK: &str = "FluxRS Root CA";
+
+    pub fn trust_status(pem: &str) -> TrustStatus {
+        match std::fs::read_to_string(SYSTEM_PATH) {
+            Ok(installed) if installed.trim() == pem.trim() => TrustStatus::Trusted,
+            _ => TrustStatus::NotTrusted,
+        }
+    }
+
+    fn quote(p: &Path) -> String {
+        format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
+    }
+
+    pub fn install(path: &Path) -> Result<String, CertError> {
+        let script = format!(
+            "install -m 644 {} {SYSTEM_PATH} && update-ca-certificates",
+            quote(path)
+        );
+        crate::netfilter::run_privileged(&script).map_err(CertError::Other)?;
+        let mut msg =
+            String::from("Root CA installed in the system store (update-ca-certificates).");
+        // Chrome/Chromium read the per-user NSS database.
+        if let Some(home) = std::env::var_os("HOME") {
+            let db = Path::new(&home).join(".pki/nssdb");
+            let has_certutil = Command::new("certutil").arg("-H").output().is_ok();
+            if has_certutil {
+                let dbarg = format!("sql:{}", db.display());
+                if !db.join("cert9.db").exists() {
+                    let _ = std::fs::create_dir_all(&db);
+                    let _ = Command::new("certutil")
+                        .args(["-d", &dbarg, "-N", "--empty-password"])
+                        .output();
+                }
+                let _ = Command::new("certutil")
+                    .args(["-d", &dbarg, "-D", "-n", NSS_NICK])
+                    .output();
+                let ok = Command::new("certutil")
+                    .args(["-d", &dbarg, "-A", "-t", "C,,", "-n", NSS_NICK, "-i"])
+                    .arg(path)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if ok {
+                    msg.push_str(" Also added to Chrome's NSS store.");
+                }
+            } else {
+                msg.push_str(" Install libnss3-tools to also trust it in Chrome automatically.");
+            }
+        }
+        Ok(msg)
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn install_root_ca(path: &Path) -> Result<String, CertError> {
     Err(CertError::Other(format!(
         "Automatic install is only supported on Windows. Import {} manually.",

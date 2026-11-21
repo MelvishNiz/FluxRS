@@ -37,8 +37,8 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
-  linux-core:
-    name: Test core (Linux)
+  linux:
+    name: Test (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,8 +50,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (core)
-        run: cargo clippy -p fluxrs-core --all-targets --locked -- -D warnings
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Test (core)
-        run: cargo test -p fluxrs-core --locked
+      - name: Test
+        run: cargo test --workspace --locked
+
+      # Proxyless capture with real iptables rules and CA install.
+      # Built as the runner user, run as root.
+      - name: Test proxyless (root, iptables)
+        run: |
+          cargo test -p fluxrs-core --test netfilter --locked --no-run 2>&1 | tee build.log
+          BIN=$(grep -o 'target/debug/deps/netfilter-[0-9a-f]*' build.log | head -1)
+          test -n "$BIN"
+          sudo FLUXRS_NETFILTER_TEST=1 "./$BIN" --test-threads=1

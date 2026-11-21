@@ -31,5 +31,23 @@ dirs = "6"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 bytes = "1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+signal-hook = "0.3"
+
 [build-dependencies]
 embed-manifest = "1.4"
+
+[package.metadata.deb]
+name = "fluxrs"
+maintainer = "FluxRS contributors"
+copyright = "FluxRS contributors, GPL-3.0"
+extended-description = "Proxyless HTTP/HTTPS debugger: capture, intercept and rewrite traffic. Proxyless mode uses iptables (asks for admin rights through pkexec)."
+section = "net"
+priority = "optional"
+depends = "$auto, libxkbcommon-x11-0, libgl1, iptables, pkexec | policykit-1, ca-certificates"
+recommends = "libnss3-tools"
+assets = [
+    ["target/release/fluxrs", "usr/bin/", "755"],
+    ["assets/linux/fluxrs.desktop", "usr/share/applications/", "644"],
+    ["assets/linux/fluxrs.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+]
