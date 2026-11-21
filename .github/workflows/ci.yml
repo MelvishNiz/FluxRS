@@ -60,7 +60,8 @@ jobs:
       # Built as the runner user, run as root.
       - name: Test proxyless (root, iptables)
         run: |
-          cargo test -p fluxrs-core --test netfilter --locked --no-run 2>&1 | tee build.log
-          BIN=$(grep -o 'target/debug/deps/netfilter-[0-9a-f]*' build.log | head -1)
-          test -n "$BIN"
-          sudo FLUXRS_NETFILTER_TEST=1 "./$BIN" --test-threads=1
+          BIN=$(cargo test -p fluxrs-core --test netfilter --locked --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "netfilter") | .executable' | head -1)
+          echo "test binary: $BIN"
+          test -x "$BIN"
+          sudo FLUXRS_NETFILTER_TEST=1 "$BIN" --test-threads=1
