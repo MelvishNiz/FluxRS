@@ -158,8 +158,8 @@ fn main() {
                 canvas,
                 eframe::WebOptions::default(),
                 Box::new(|cc| {
-                    let url = remote::default_url();
-                    let backend = Box::new(remote::RemoteBackend::new(url, &cc.egui_ctx));
+                    let target = remote::initial_target();
+                    let backend = Box::new(remote::RemoteBackend::new(target, &cc.egui_ctx));
                     Ok(Box::new(app::FluxApp::new(cc, backend)))
                 }),
             )

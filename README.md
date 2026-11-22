@@ -96,7 +96,16 @@ fluxrs --serve
 ```
 
 It prints a link like `http://127.0.0.1:8800/#token=…`. Open it in any modern
-browser. Options:
+browser.
+
+**Online version:** the web UI is also published on GitHub Pages at
+<https://melvishniz.github.io/http-debugger2/>. The page connects to the
+FluxRS engine running on your computer: `fluxrs --serve` prints a ready link
+(`…#host=127.0.0.1:8800&token=…`), or enter the host and token in the connect
+form. The page remembers both in the browser. Browsers allow an https page to
+reach `ws://127.0.0.1` or `ws://localhost`, but not plain `ws://` to other
+machines. For another machine, open the link that machine serves itself.
+Chrome may ask for permission to access devices on the local network. Options:
 
 * `--listen 0.0.0.0:8800`: reachable from other devices on the LAN (use the
   machine's IP address in the link). Only do this on a trusted network.
@@ -187,6 +196,9 @@ crates/fluxrs-app    egui UI (desktop + wasm), host, `--serve` web server
 
 * **CI** (`ci.yml`) runs on every push and pull request: `cargo fmt`,
   `clippy -D warnings` and every test on Windows, plus core tests on Linux.
+* **Pages** (`pages.yml`) builds the web UI and deploys it to GitHub Pages
+  on every push that changes the code. One-time setup: Settings → Pages →
+  Source: **GitHub Actions**.
 * **Build** (`build.yml`) is started manually from the Actions tab
   (*Run workflow*). It tests, builds the release exe, downloads WinDivert
   (SHA-256 checked) and uploads a ready-to-run package.

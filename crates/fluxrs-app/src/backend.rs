@@ -13,12 +13,24 @@ pub trait Backend {
     fn connection(&self) -> Option<ConnectionState> {
         None
     }
+    /// Remote: (host, token) currently configured, for the connect form.
+    fn target(&self) -> Option<(String, String)> {
+        None
+    }
+    /// Remote: connect to another host.
+    fn configure(&mut self, _host: &str, _token: &str) {}
+    /// Remote: base URL of the host's HTTP server (e.g. for `/ca.crt`).
+    fn http_base(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Only remote (browser) backends construct the non-connected states.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub enum ConnectionState {
+    /// No host configured yet (e.g. page opened from GitHub Pages).
+    NeedsSetup,
     Connecting,
     Connected,
     Disconnected(String),

@@ -1,0 +1,63 @@
+name: Pages
+
+# Builds the browser UI (WebAssembly) and publishes it to GitHub Pages.
+# One-time setup: repository Settings -> Pages -> Source: "GitHub Actions".
+on:
+  push:
+    branches: [main, master, claude/determined-mendel-5z4kol]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/pages.yml"
+      - ".github/scripts/install-wasm-tools.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-bindgen
+        run: .github/scripts/install-wasm-tools.sh
+
+      - name: Build web UI
+        run: |
+          crates/fluxrs-app/web/build.sh
+          touch crates/fluxrs-app/web/dist/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: crates/fluxrs-app/web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

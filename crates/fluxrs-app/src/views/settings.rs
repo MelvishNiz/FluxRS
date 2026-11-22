@@ -175,11 +175,12 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
                     open_folder(dir);
                 }
             }
-            #[cfg(target_arch = "wasm32")]
-            ui.hyperlink_to(
-                RichText::new("Download certificate").color(ACCENT_HI),
-                "/ca.crt",
-            );
+            if let Some(base) = app.http_base() {
+                ui.hyperlink_to(
+                    RichText::new("Download certificate").color(ACCENT_HI),
+                    format!("{base}/ca.crt"),
+                );
+            }
             if !app.settings_ui.confirm_regenerate {
                 if ghost_button(ui, icon::ROTATE_CCW, "Regenerate").clicked() {
                     app.settings_ui.confirm_regenerate = true;

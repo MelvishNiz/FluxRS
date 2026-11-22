@@ -33,6 +33,9 @@ const WEB_BODY_CAP: usize = 1024 * 1024;
 const REPLAY: usize = 2000;
 const STORE: usize = 5000;
 
+/// Hosted copy of the web UI (GitHub Pages). Override with FLUXRS_PAGES_URL.
+const PAGES_URL: &str = "https://melvishniz.github.io/http-debugger2/";
+
 pub struct ServeOptions {
     pub listen: SocketAddr,
     pub web_root: PathBuf,
@@ -293,6 +296,10 @@ pub fn run(opts: ServeOptions) -> Result<(), String> {
             opts.listen
         };
         println!("FluxRS web UI: http://{shown}/#token={}", opts.token);
+        let pages = std::env::var("FLUXRS_PAGES_URL").unwrap_or_else(|_| PAGES_URL.into());
+        if shown.ip().is_loopback() {
+            println!("Online UI:     {pages}#host={shown}&token={}", opts.token);
+        }
         if opts.listen.ip().is_unspecified() {
             println!(
                 "(listening on all interfaces; use this machine's LAN address from other devices)"
