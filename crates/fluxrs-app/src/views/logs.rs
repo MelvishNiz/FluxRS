@@ -1,7 +1,7 @@
 use crate::app::FluxApp;
 use crate::theme::{icon, *};
 use eframe::egui::{self, RichText};
-use fluxrs_core::LogLevel;
+use fluxrs_model::LogLevel;
 
 pub fn show(app: &mut FluxApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
@@ -28,11 +28,7 @@ pub fn show(app: &mut FluxApp, ui: &mut egui::Ui) {
                         LogLevel::Warn => ("WARN", YELLOW),
                         LogLevel::Error => ("ERROR", RED),
                     };
-                    let t = l
-                        .time
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
+                    let t = l.time.as_secs();
                     let clock =
                         format!("{:02}:{:02}:{:02}", (t / 3600) % 24, (t / 60) % 60, t % 60);
                     ui.horizontal_wrapped(|ui| {

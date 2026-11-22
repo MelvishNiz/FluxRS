@@ -3,7 +3,7 @@
 use crate::app::FluxApp;
 use crate::theme::{icon, *};
 use eframe::egui::{self, Margin, RichText};
-use fluxrs_core::{Action, Filter, FilterField, MatchOp, Rule};
+use fluxrs_model::{Action, Filter, FilterField, MatchOp, Rule};
 
 #[derive(Default)]
 pub struct RulesState {

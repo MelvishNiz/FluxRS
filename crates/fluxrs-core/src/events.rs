@@ -4,12 +4,7 @@ use crate::intercept::InterceptTicket;
 use crate::model::Exchange;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogLevel {
-    Info,
-    Warn,
-    Error,
-}
+pub use fluxrs_model::LogLevel;
 
 #[derive(Debug)]
 pub enum ProxyEvent {

@@ -22,6 +22,8 @@ pub mod rules;
 pub mod tls;
 pub mod tlsinfo;
 
+pub use fluxrs_model::protocol;
+
 pub use cert::{CertificateAuthority, TrustStatus};
 pub use engine::{CaptureMode, Engine, EngineConfig, RulesHandle};
 pub use events::{EventSink, LogLevel, ProxyEvent};

@@ -3,8 +3,7 @@
 use crate::app::FluxApp;
 use crate::theme::{icon, *};
 use eframe::egui::{self, Margin, RichText, Stroke};
-use fluxrs_core::{CaptureMode, CertificateAuthority, TrustStatus};
-use std::sync::Arc;
+use fluxrs_model::{CaptureMode, TrustStatus};
 
 #[derive(Default)]
 pub struct SettingsState {
@@ -127,7 +126,16 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if trust != Some(TrustStatus::Trusted)
-                            && primary_button(ui, icon::SHIELD_CHECK, "Install certificate", ACCENT)
+                            && primary_button(
+                                ui,
+                                icon::SHIELD_CHECK,
+                                if app.is_local() {
+                                    "Install certificate"
+                                } else {
+                                    "Install on host"
+                                },
+                                ACCENT,
+                            )
                                 .clicked()
                         {
                             app.install_ca(&ctx);
@@ -144,7 +152,7 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
             ui.label(RichText::new("File").color(TEXT_DIM));
             ui.add(
                 egui::Label::new(
-                    RichText::new(ca.ca_cert_path().display().to_string())
+                    RichText::new(ca.path.clone())
                         .font(mono(12.0))
                         .color(TEXT),
                 )
@@ -153,17 +161,25 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
         });
         ui.horizontal(|ui| {
             ui.label(RichText::new("Serial").color(TEXT_DIM));
-            ui.label(RichText::new(ca.serial_hex()).font(mono(12.0)).color(TEXT_DIM));
+            ui.label(RichText::new(ca.serial.clone()).font(mono(12.0)).color(TEXT_DIM));
         });
         ui.add_space(10.0);
         ui.horizontal_wrapped(|ui| {
             if ghost_button(ui, icon::COPY, "Copy PEM").clicked() {
-                ctx.copy_text(ca.ca_pem().to_string());
+                ctx.copy_text(ca.pem.clone());
                 app.toast(&ctx, "Certificate copied", GREEN);
             }
-            if ghost_button(ui, icon::FOLDER_OPEN, "Open folder").clicked() {
-                open_folder(ca.dir());
+            #[cfg(not(target_arch = "wasm32"))]
+            if app.is_local() && ghost_button(ui, icon::FOLDER_OPEN, "Open folder").clicked() {
+                if let Some(dir) = std::path::Path::new(&ca.path).parent() {
+                    open_folder(dir);
+                }
             }
+            #[cfg(target_arch = "wasm32")]
+            ui.hyperlink_to(
+                RichText::new("Download certificate").color(ACCENT_HI),
+                "/ca.crt",
+            );
             if !app.settings_ui.confirm_regenerate {
                 if ghost_button(ui, icon::ROTATE_CCW, "Regenerate").clicked() {
                     app.settings_ui.confirm_regenerate = true;
@@ -172,15 +188,7 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
                 ui.label(RichText::new("The old certificate stops working. Continue?").color(YELLOW));
                 if primary_button(ui, icon::ROTATE_CCW, "Regenerate", RED).clicked() {
                     app.settings_ui.confirm_regenerate = false;
-                    app.stop();
-                    match CertificateAuthority::regenerate(ca.dir()) {
-                        Ok(new) => {
-                            app.ca = Some(Arc::new(new));
-                            app.refresh_ca_trust(&ctx);
-                            app.toast(&ctx, "New root CA generated — install it again", YELLOW);
-                        }
-                        Err(e) => app.toast(&ctx, format!("Regenerate failed: {e}"), RED),
-                    }
+                    app.regenerate_ca();
                 }
                 if ghost_button(ui, icon::X, "Cancel").clicked() {
                     app.settings_ui.confirm_regenerate = false;
@@ -198,14 +206,13 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
                 .color(TEXT_FAINT),
             );
         });
-        if let Some(e) = &app.engine {
+        if let Some(addr) = app.local_addr().map(str::to_string) {
             if app.settings.engine.mode == CaptureMode::Proxy {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(ico(icon::INFO, 12.0, TEXT_FAINT));
                     ui.label(
                         RichText::new(format!(
-                            "Other devices can download it from http://{}/ca.crt through the proxy.",
-                            e.local_addr()
+                            "Other devices can download it from http://{addr}/ca.crt through the proxy."
                         ))
                         .size(11.5)
                         .color(TEXT_FAINT),
@@ -369,6 +376,7 @@ fn about_card(ui: &mut egui::Ui) {
     });
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn open_folder(path: &std::path::Path) {
     #[cfg(windows)]
     let cmd = "explorer";

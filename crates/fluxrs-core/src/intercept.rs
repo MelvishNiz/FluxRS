@@ -2,47 +2,13 @@
 //! user edit it as raw HTTP text, then forward or drop it.
 
 use crate::model::{ExchangeId, RequestData};
-use crate::rules::{CompiledFilterPub, Filter, RuleError};
+use crate::rules::{CompiledFilterPub, RuleError};
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct InterceptConfig {
-    pub enabled: bool,
-    pub requests: bool,
-    pub responses: bool,
-    /// Only exchanges matching this filter are paused. Empty value = all.
-    pub filter: Filter,
-}
-
-impl Default for InterceptConfig {
-    fn default() -> Self {
-        InterceptConfig {
-            enabled: false,
-            requests: true,
-            responses: false,
-            filter: Filter::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InterceptPhase {
-    Request,
-    Response,
-}
-
-#[derive(Debug)]
-pub enum Decision {
-    /// Forward. `Some(raw)` replaces the message with the edited raw text.
-    Forward(Option<String>),
-    /// Abort the exchange.
-    Drop,
-}
+pub use fluxrs_model::intercept::{Decision, InterceptConfig, InterceptPhase, TicketInfo};
 
 /// A paused exchange waiting for a decision. Dropping the ticket
 /// without resolving it forwards the message unchanged.
@@ -71,6 +37,18 @@ impl std::fmt::Debug for InterceptTicket {
 }
 
 impl InterceptTicket {
+    /// Serializable description for user interfaces.
+    pub fn info(&self) -> TicketInfo {
+        TicketInfo {
+            ticket_id: self.ticket_id,
+            exchange_id: self.exchange_id,
+            phase: self.phase,
+            title: self.title.clone(),
+            raw: self.raw.clone(),
+            binary_body: self.binary_body,
+        }
+    }
+
     pub fn resolve(mut self, decision: Decision) {
         if let Some(tx) = self.responder.take() {
             let _ = tx.send(decision);
@@ -155,7 +133,7 @@ impl Interceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::{FilterField, MatchOp};
+    use crate::rules::{Filter, FilterField, MatchOp};
 
     fn req(host: &str) -> RequestData {
         RequestData {

@@ -1,18 +1,20 @@
 //! Application state, event handling and the main layout.
+//!
+//! The UI never touches the engine directly: it mirrors host state from
+//! [`ServerMsg`]s and sends [`ClientMsg`]s through a [`Backend`], so the
+//! same code runs on the desktop and in the browser.
 
-use crate::store::{self, Settings};
+use crate::backend::{Backend, ConnectionState};
 use crate::theme::{self, icon, *};
 use crate::views;
 use eframe::egui::{self, Margin, RichText, Stroke};
-use fluxrs_core::{
-    CaptureMode, CertificateAuthority, Decision, Engine, EventSink, Exchange, ExchangeId,
-    InterceptTicket, Interceptor, LogLevel, ProxyEvent, Rule, RulesHandle, TrustStatus,
+use fluxrs_model::protocol::{CaInfo, ClientMsg, ServerMsg, Status};
+use fluxrs_model::{
+    CaptureMode, Decision, Exchange, ExchangeId, LogLevel, Rule, Settings, TicketInfo, TrustStatus,
 };
-use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::Duration;
 
 const MAX_EXCHANGES: usize = 20_000;
 const MAX_LOGS: usize = 2_000;
@@ -45,13 +47,14 @@ impl View {
 }
 
 pub struct LogLine {
-    pub time: SystemTime,
+    /// Time since the Unix epoch.
+    pub time: Duration,
     pub level: LogLevel,
     pub text: String,
 }
 
 pub struct PendingTicket {
-    pub ticket: Option<InterceptTicket>,
+    pub info: TicketInfo,
     pub edited: String,
 }
 
@@ -62,20 +65,18 @@ pub struct Toast {
 }
 
 pub struct FluxApp {
-    pub data_dir: PathBuf,
-    pub ca: Option<Arc<CertificateAuthority>>,
+    backend: Box<dyn Backend>,
+    /// Hello received from the host.
+    pub ready: bool,
+    pub host_os: String,
+    pub ca: Option<CaInfo>,
     pub ca_error: Option<String>,
-    /// Result of the background "is the CA trusted" check.
-    ca_trust: Arc<Mutex<Option<TrustStatus>>>,
+    trust: Option<TrustStatus>,
     pub settings: Settings,
     pub rules: Vec<Rule>,
-    pub rules_handle: RulesHandle,
     pub rules_error: Option<String>,
-    pub interceptor: Interceptor,
     pub intercept_error: Option<String>,
-    pub engine: Option<Engine>,
-    pub engine_error: Option<String>,
-    inbox: Arc<Mutex<Vec<ProxyEvent>>>,
+    pub status: Status,
 
     pub exchanges: Vec<Arc<Exchange>>,
     index: HashMap<ExchangeId, usize>,
@@ -90,37 +91,27 @@ pub struct FluxApp {
     pub settings_ui: views::settings::SettingsState,
 }
 
+fn now() -> Duration {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
 impl FluxApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, backend: Box<dyn Backend>) -> Self {
         theme::apply(&cc.egui_ctx);
-        let data_dir = store::data_dir();
-        let settings = store::load_settings(&data_dir);
-        let rules = store::load_rules(&data_dir);
-        let (ca, ca_error) = match CertificateAuthority::load_or_create(&data_dir) {
-            Ok(ca) => (Some(Arc::new(ca)), None),
-            Err(e) => (None, Some(e.to_string())),
-        };
-        let rules_handle = RulesHandle::default();
-        let rules_error = rules_handle.set(&rules).err().map(|e| e.to_string());
-        let interceptor = Interceptor::default();
-        let intercept_error = interceptor
-            .set_config(settings.intercept.clone())
-            .err()
-            .map(|e| e.to_string());
         let mut app = FluxApp {
-            data_dir,
-            ca,
-            ca_error,
-            ca_trust: Arc::default(),
-            settings,
-            rules,
-            rules_handle,
-            rules_error,
-            interceptor,
-            intercept_error,
-            engine: None,
-            engine_error: None,
-            inbox: Arc::default(),
+            backend,
+            ready: false,
+            host_os: String::new(),
+            ca: None,
+            ca_error: None,
+            trust: None,
+            settings: Settings::default(),
+            rules: Vec::new(),
+            rules_error: None,
+            intercept_error: None,
+            status: Status::default(),
             exchanges: Vec::new(),
             index: HashMap::new(),
             tickets: Vec::new(),
@@ -132,19 +123,19 @@ impl FluxApp {
             intercept_ui: Default::default(),
             settings_ui: Default::default(),
         };
-        app.log(
-            LogLevel::Info,
-            format!("Data directory: {}", app.data_dir.display()),
-        );
-        app.refresh_ca_trust(&cc.egui_ctx);
-        // Command line: --start (begin capture), --view <traffic|intercept|rules|settings|logs>
-        let args: Vec<String> = std::env::args().collect();
+        app.process_messages(&cc.egui_ctx);
+        app
+    }
+
+    /// Apply `--view <name>` and `--start` (desktop command line).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn apply_args(&mut self, args: &[String], ctx: &egui::Context) {
         if let Some(v) = args
             .iter()
             .position(|a| a == "--view")
             .and_then(|i| args.get(i + 1))
         {
-            app.view = match v.as_str() {
+            self.view = match v.as_str() {
                 "intercept" => View::Intercept,
                 "rules" => View::Rules,
                 "settings" => View::Settings,
@@ -153,14 +144,18 @@ impl FluxApp {
             };
         }
         if args.iter().any(|a| a == "--start") {
-            app.start(&cc.egui_ctx);
+            self.start(ctx);
+            self.process_messages(ctx);
         }
-        app
+    }
+
+    pub fn is_local(&self) -> bool {
+        self.backend.is_local()
     }
 
     pub fn log(&mut self, level: LogLevel, text: impl Into<String>) {
         self.logs.push_back(LogLine {
-            time: SystemTime::now(),
+            time: now(),
             level,
             text: text.into(),
         });
@@ -178,100 +173,62 @@ impl FluxApp {
         });
     }
 
-    /// Re-check (in the background) whether the root CA is trusted.
-    pub fn refresh_ca_trust(&mut self, ctx: &egui::Context) {
-        let Some(ca) = self.ca.clone() else { return };
-        let slot = self.ca_trust.clone();
-        *slot.lock() = None;
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let status = ca.os_trust_status();
-            *slot.lock() = Some(status);
-            ctx.request_repaint();
-        });
+    fn send(&mut self, msg: ClientMsg) {
+        self.backend.send(msg);
+    }
+
+    pub fn refresh_ca_trust(&mut self, _ctx: &egui::Context) {
+        self.send(ClientMsg::RefreshTrust);
     }
 
     pub fn ca_trust(&self) -> Option<TrustStatus> {
-        *self.ca_trust.lock()
+        self.trust
     }
 
-    pub fn install_ca(&mut self, ctx: &egui::Context) {
-        let Some(ca) = self.ca.clone() else { return };
-        match ca.install_in_os_store() {
-            Ok(msg) => {
-                self.log(LogLevel::Info, msg.clone());
-                self.toast(ctx, msg, GREEN);
-            }
-            Err(e) => {
-                self.log(LogLevel::Error, e.to_string());
-                self.toast(ctx, e.to_string(), RED);
-            }
-        }
-        self.refresh_ca_trust(ctx);
+    pub fn install_ca(&mut self, _ctx: &egui::Context) {
+        self.send(ClientMsg::InstallCa);
+    }
+
+    pub fn regenerate_ca(&mut self) {
+        self.send(ClientMsg::RegenerateCa);
     }
 
     pub fn is_running(&self) -> bool {
-        self.engine.is_some()
+        self.status.running
     }
 
-    pub fn start(&mut self, ctx: &egui::Context) {
-        if self.engine.is_some() {
-            return;
-        }
-        let Some(ca) = self.ca.clone() else {
-            self.engine_error = Some("Root CA unavailable".into());
-            return;
-        };
-        let inbox = self.inbox.clone();
-        let repaint = ctx.clone();
-        let sink: EventSink = Arc::new(move |ev| {
-            inbox.lock().push(ev);
-            repaint.request_repaint();
-        });
-        match Engine::start(
-            self.settings.engine.clone(),
-            ca,
-            self.rules_handle.clone(),
-            self.interceptor.clone(),
-            sink,
-        ) {
-            Ok(engine) => {
-                let addr = engine.local_addr();
-                self.engine = Some(engine);
-                self.engine_error = None;
-                self.toast(ctx, format!("Capture running on {addr}"), GREEN);
-            }
-            Err(e) => {
-                self.log(LogLevel::Error, format!("Start failed: {e}"));
-                self.toast(ctx, format!("Start failed: {e}"), RED);
-                self.engine_error = Some(e);
-            }
-        }
+    /// Address the engine listens on, when running.
+    pub fn local_addr(&self) -> Option<&str> {
+        self.status.addr.as_deref()
+    }
+
+    pub fn start(&mut self, _ctx: &egui::Context) {
+        self.send(ClientMsg::Start);
     }
 
     pub fn stop(&mut self) {
-        self.release_all_tickets();
-        if let Some(mut e) = self.engine.take() {
-            e.stop();
-        }
-        self.drain_events();
+        self.tickets.clear();
+        self.send(ClientMsg::Stop);
     }
 
     /// Forward every paused message unchanged.
     pub fn release_all_tickets(&mut self) {
-        for t in self.tickets.drain(..) {
-            if let Some(ticket) = t.ticket {
-                ticket.resolve(Decision::Forward(None));
-            }
+        let ids: Vec<u64> = self.tickets.drain(..).map(|t| t.info.ticket_id).collect();
+        for ticket_id in ids {
+            self.send(ClientMsg::Resolve {
+                ticket_id,
+                decision: Decision::Forward(None),
+            });
         }
     }
 
     pub fn resolve_ticket(&mut self, idx: usize, decision: Decision) {
         if idx < self.tickets.len() {
             let t = self.tickets.remove(idx);
-            if let Some(ticket) = t.ticket {
-                ticket.resolve(decision);
-            }
+            self.send(ClientMsg::Resolve {
+                ticket_id: t.info.ticket_id,
+                decision,
+            });
         }
     }
 
@@ -279,6 +236,7 @@ impl FluxApp {
         self.exchanges.clear();
         self.index.clear();
         self.traffic.selected = None;
+        self.send(ClientMsg::Clear);
     }
 
     pub fn exchange(&self, id: ExchangeId) -> Option<&Arc<Exchange>> {
@@ -286,54 +244,71 @@ impl FluxApp {
     }
 
     pub fn save_settings(&mut self) {
-        if let Err(e) = store::save_settings(&self.data_dir, &self.settings) {
-            self.log(LogLevel::Error, format!("save settings: {e}"));
-        }
+        self.send(ClientMsg::SetSettings(self.settings.clone()));
     }
 
-    /// Recompile + persist rules after an edit.
+    /// Recompile + persist rules after an edit (the host validates them).
     pub fn rules_changed(&mut self) {
-        match self.rules_handle.set(&self.rules) {
-            Ok(()) => self.rules_error = None,
-            Err(e) => self.rules_error = Some(e.to_string()),
-        }
-        if let Err(e) = store::save_rules(&self.data_dir, &self.rules) {
-            self.log(LogLevel::Error, format!("save rules: {e}"));
-        }
+        self.send(ClientMsg::SetRules(self.rules.clone()));
     }
 
     pub fn intercept_changed(&mut self) {
-        match self.interceptor.set_config(self.settings.intercept.clone()) {
-            Ok(()) => self.intercept_error = None,
-            Err(e) => self.intercept_error = Some(e.to_string()),
-        }
         if !self.settings.intercept.enabled {
-            self.release_all_tickets();
+            self.tickets.clear();
         }
         self.save_settings();
     }
 
-    fn drain_events(&mut self) {
-        let events = std::mem::take(&mut *self.inbox.lock());
-        for ev in events {
-            match ev {
-                ProxyEvent::Exchange(ex) => self.upsert(ex),
-                ProxyEvent::Intercepted(ticket) => {
-                    if self.settings.intercept.enabled {
-                        let edited = ticket.raw.clone();
-                        self.tickets.push(PendingTicket {
-                            ticket: Some(ticket),
-                            edited,
-                        });
-                    } else {
-                        ticket.resolve(Decision::Forward(None));
+    fn process_messages(&mut self, ctx: &egui::Context) {
+        for msg in self.backend.poll() {
+            match msg {
+                ServerMsg::Hello(h) => {
+                    let h = *h;
+                    self.ready = true;
+                    self.host_os = h.os;
+                    self.settings = h.settings;
+                    self.rules = h.rules;
+                    self.rules_error = h.rules_error;
+                    self.intercept_error = h.intercept_error;
+                    self.status = h.status;
+                    self.ca = h.ca;
+                    self.ca_error = h.ca_error;
+                    self.trust = h.trust;
+                    self.settings_ui = Default::default();
+                    // A reconnect replays the current state.
+                    self.exchanges.clear();
+                    self.index.clear();
+                    self.tickets.clear();
+                }
+                ServerMsg::Status(s) => self.status = s,
+                ServerMsg::Exchange(ex) => self.upsert(ex),
+                ServerMsg::Cleared => {
+                    self.exchanges.clear();
+                    self.index.clear();
+                    self.traffic.selected = None;
+                }
+                ServerMsg::Ticket(info) => {
+                    if !self
+                        .tickets
+                        .iter()
+                        .any(|t| t.info.ticket_id == info.ticket_id)
+                    {
+                        let edited = info.raw.clone();
+                        self.tickets.push(PendingTicket { info, edited });
                     }
                 }
-                ProxyEvent::Log(level, text) => self.log(level, text),
-                ProxyEvent::Stopped(err) => {
-                    if let Some(e) = err {
-                        self.log(LogLevel::Error, format!("Engine stopped: {e}"));
-                    }
+                ServerMsg::TicketClosed(id) => self.tickets.retain(|t| t.info.ticket_id != id),
+                ServerMsg::Log { level, text } => self.log(level, text),
+                ServerMsg::RulesError(e) => self.rules_error = e,
+                ServerMsg::InterceptError(e) => self.intercept_error = e,
+                ServerMsg::Trust(t) => self.trust = t,
+                ServerMsg::Ca { ca, error } => {
+                    self.ca = ca;
+                    self.ca_error = error;
+                }
+                ServerMsg::Toast { text, ok } => {
+                    let color = if ok { GREEN } else { RED };
+                    self.toast(ctx, text, color);
                 }
             }
         }
@@ -502,10 +477,18 @@ impl FluxApp {
                 ui.add_space(2.0);
                 if ui
                     .add(
-                        egui::Button::new(strong("Install certificate", 12.0, YELLOW))
-                            .fill(YELLOW.gamma_multiply(0.12))
-                            .stroke(Stroke::new(1.0, YELLOW.gamma_multiply(0.4)))
-                            .min_size(egui::vec2(ui.available_width(), 26.0)),
+                        egui::Button::new(strong(
+                            if self.is_local() {
+                                "Install certificate"
+                            } else {
+                                "Install on host"
+                            },
+                            12.0,
+                            YELLOW,
+                        ))
+                        .fill(YELLOW.gamma_multiply(0.12))
+                        .stroke(Stroke::new(1.0, YELLOW.gamma_multiply(0.4)))
+                        .min_size(egui::vec2(ui.available_width(), 26.0)),
                     )
                     .clicked()
                 {
@@ -526,9 +509,10 @@ impl FluxApp {
             ui.separator();
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                match &self.engine {
-                    Some(_) => live_dot(ui, GREEN),
-                    None => dot(ui, TEXT_FAINT, 3.5),
+                if self.is_running() {
+                    live_dot(ui, GREEN);
+                } else {
+                    dot(ui, TEXT_FAINT, 3.5);
                 }
                 let mode = match self.settings.engine.mode {
                     CaptureMode::Proxyless => "Proxyless",
@@ -631,10 +615,10 @@ impl FluxApp {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
-            let (color, text) = match (&self.engine, &self.engine_error) {
-                (Some(e), _) => (GREEN, format!("Capturing on {}", e.local_addr())),
-                (None, Some(err)) => (RED, format!("Error: {err}")),
-                (None, None) => (TEXT_FAINT, "Idle".to_string()),
+            let (color, text) = match (&self.status.addr, &self.status.error) {
+                (Some(addr), _) if self.status.running => (GREEN, format!("Capturing on {addr}")),
+                (_, Some(err)) => (RED, format!("Error: {err}")),
+                _ => (TEXT_FAINT, "Idle".to_string()),
             };
             dot(ui, color, 3.0);
             ui.label(RichText::new(text).size(11.5).color(TEXT_DIM));
@@ -668,6 +652,50 @@ impl FluxApp {
                 });
             }
         });
+    }
+
+    /// Remote UI: show connection problems. Returns false while there is
+    /// no state to show yet.
+    fn connection_banner(&mut self, ui: &mut egui::Ui, state: &ConnectionState) -> bool {
+        if self.ready && *state == ConnectionState::Connected {
+            return true;
+        }
+        let (title, text) = match state {
+            ConnectionState::Connecting => ("Connecting to FluxRS…", String::new()),
+            ConnectionState::Connected => ("Waiting for the FluxRS host…", String::new()),
+            ConnectionState::Disconnected(e) => ("Connection lost — retrying", e.clone()),
+        };
+        if self.ready {
+            // Keep the last known state visible behind a banner.
+            egui::Panel::top("conn_banner")
+                .frame(
+                    egui::Frame::new()
+                        .fill(RED.gamma_multiply(0.15))
+                        .inner_margin(Margin::symmetric(16, 6)),
+                )
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(ico(icon::CIRCLE_ALERT, 14.0, RED));
+                        ui.label(strong(title, 13.0, TEXT));
+                        ui.label(RichText::new(text).size(12.0).color(TEXT_DIM));
+                    });
+                });
+            return true;
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BG))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(ui.available_height() * 0.35);
+                    logo(ui, 56.0);
+                    ui.add_space(14.0);
+                    ui.label(strong(title, 18.0, TEXT));
+                    ui.label(RichText::new(text).color(TEXT_DIM));
+                    ui.add_space(10.0);
+                    ui.spinner();
+                });
+            });
+        false
     }
 
     fn show_toasts(&mut self, ui: &mut egui::Ui) {
@@ -708,7 +736,17 @@ impl FluxApp {
 
 impl eframe::App for FluxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.drain_events();
+        let ctx = ui.ctx().clone();
+        self.process_messages(&ctx);
+        if let Some(state) = self.backend.connection() {
+            if state != ConnectionState::Connected {
+                // Keep polling while (re)connecting.
+                ctx.request_repaint_after(Duration::from_millis(500));
+            }
+            if !self.connection_banner(ui, &state) {
+                return;
+            }
+        }
 
         egui::Panel::left("sidebar")
             .resizable(false)
@@ -757,7 +795,11 @@ impl eframe::App for FluxApp {
         self.show_toasts(ui);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.stop();
+        // Desktop: stop capture (and remove proxyless redirection) on exit.
+        if self.is_local() {
+            self.stop();
+        }
     }
 }

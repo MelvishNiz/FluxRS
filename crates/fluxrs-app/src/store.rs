@@ -1,15 +1,9 @@
 //! Persistence of settings and rules (JSON files in the data directory).
 
-use fluxrs_core::{EngineConfig, InterceptConfig, Rule};
+use fluxrs_model::Rule;
+pub use fluxrs_model::Settings;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(default)]
-pub struct Settings {
-    pub engine: EngineConfig,
-    pub intercept: InterceptConfig,
-}
 
 pub fn data_dir() -> PathBuf {
     dirs::data_dir()
@@ -54,7 +48,7 @@ pub fn save_rules(dir: &Path, rules: &[Rule]) -> Result<(), String> {
 
 /// Example rules (disabled) shown on first launch.
 fn default_rules() -> Vec<Rule> {
-    use fluxrs_core::{Action, Filter, FilterField, MatchOp};
+    use fluxrs_model::{Action, Filter, FilterField, MatchOp};
     vec![
         Rule {
             name: "Example: allow CORS for an API".into(),

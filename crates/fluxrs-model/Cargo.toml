@@ -1,0 +1,17 @@
+[package]
+name = "fluxrs-model"
+description = "Shared, wasm-compatible data model and protocol of FluxRS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+bytes = "1"
+base64 = "0.22"
+flate2 = "1"
+brotli = "8"
+
+[dev-dependencies]
+serde_json = "1"

@@ -15,11 +15,44 @@ env:
   WINDIVERT_SHA256: "63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15"
 
 jobs:
+  web:
+    name: Web UI (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-bindgen
+        run: .github/scripts/install-wasm-tools.sh
+
+      - name: Build web UI
+        run: crates/fluxrs-app/web/build.sh
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: web-ui
+          path: crates/fluxrs-app/web/dist/
+          if-no-files-found: error
+
   windows:
     name: Windows 10/11 x64
+    needs: web
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Get web UI
+        uses: actions/download-artifact@v5
+        with:
+          name: web-ui
+          path: crates/fluxrs-app/web/dist
+
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -48,9 +81,10 @@ jobs:
           Copy-Item "$wd/x64/WinDivert64.sys" $out/
           Copy-Item "$wd/LICENSE" "$out/WinDivert-LICENSE.txt"
           Copy-Item README.md, LICENSE $out/
+          Copy-Item -Recurse crates/fluxrs-app/web/dist "$out/web"
           "PACKAGE=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ env.PACKAGE }}
           path: dist/${{ env.PACKAGE }}/
@@ -60,10 +94,18 @@ jobs:
   # The tier-3 target x86_64-win7-windows-msvc needs nightly + build-std.
   windows7:
     name: Windows 7 x64 (experimental)
+    needs: web
     runs-on: windows-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Get web UI
+        uses: actions/download-artifact@v5
+        with:
+          name: web-ui
+          path: crates/fluxrs-app/web/dist
+
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -92,9 +134,10 @@ jobs:
           Copy-Item "$wd/x64/WinDivert64.sys" $out/
           Copy-Item "$wd/LICENSE" "$out/WinDivert-LICENSE.txt"
           Copy-Item README.md, LICENSE $out/
+          Copy-Item -Recurse crates/fluxrs-app/web/dist "$out/web"
           "PACKAGE=$name" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ env.PACKAGE }}
           path: dist/${{ env.PACKAGE }}/
@@ -103,9 +146,17 @@ jobs:
   linux:
     name: Linux x64 (.deb + tar.gz)
     # Oldest supported runner = widest glibc compatibility (Ubuntu 22.04+).
+    needs: web
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Get web UI
+        uses: actions/download-artifact@v5
+        with:
+          name: web-ui
+          path: crates/fluxrs-app/web/dist
+
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -129,11 +180,12 @@ jobs:
           mkdir -p "dist/$name"
           cp target/release/fluxrs README.md LICENSE "dist/$name/"
           cp crates/fluxrs-app/assets/linux/fluxrs.desktop crates/fluxrs-app/assets/linux/fluxrs.png "dist/$name/"
+          cp -r crates/fluxrs-app/web/dist "dist/$name/web"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           cp target/debian/*.deb dist/
           echo "PACKAGE=$name" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ env.PACKAGE }}
           path: |

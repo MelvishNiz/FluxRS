@@ -5,8 +5,8 @@ use crate::theme::{icon, *};
 use bytes::Bytes;
 use eframe::egui::{self, Margin, RichText, Stroke};
 use egui_extras::{Column, TableBuilder};
-use fluxrs_core::{
-    body::decode_body, Action, CaptureMode, Exchange, ExchangeId, ExchangeState, Filter,
+use fluxrs_model::{
+    codec::decode_body, Action, CaptureMode, Exchange, ExchangeId, ExchangeState, Filter,
     FilterField, HeaderList, MatchOp, Rule, TrustStatus,
 };
 use std::sync::Arc;
@@ -96,8 +96,16 @@ pub fn show(app: &mut FluxApp, ui: &mut egui::Ui) {
             ui,
             YELLOW,
             icon::SHIELD_ALERT,
-            "HTTPS traffic can't be decrypted until the FluxRS root certificate is trusted.",
-            Some("Install certificate"),
+            if app.is_local() {
+                "HTTPS traffic can't be decrypted until the FluxRS root certificate is trusted."
+            } else {
+                "The FluxRS root certificate is not trusted on the host machine. Other devices: download it in Settings."
+            },
+            Some(if app.is_local() {
+                "Install certificate"
+            } else {
+                "Install on host"
+            }),
         ) {
             app.install_ca(&ctx);
         }
@@ -534,11 +542,7 @@ fn onboarding(app: &mut FluxApp, ui: &mut egui::Ui) {
     if running && app.settings.engine.mode == CaptureMode::Proxy {
         ui.add_space(14.0);
         ui.vertical_centered(|ui| {
-            let addr = app
-                .engine
-                .as_ref()
-                .map(|e| e.local_addr().to_string())
-                .unwrap_or_default();
+            let addr = app.local_addr().unwrap_or_default().to_string();
             ui.label(
                 RichText::new(format!("Set your client's HTTP proxy to {addr}"))
                     .font(mono(12.5))
@@ -607,7 +611,7 @@ fn body_to_text(headers: &HeaderList, body: &Bytes, raw: bool) -> String {
     let shown = &decoded[..decoded.len().min(2 * 1024 * 1024)];
     match std::str::from_utf8(shown) {
         Ok(text) if !text.contains('\0') => {
-            let ct = fluxrs_core::model::header_value(headers, "content-type").unwrap_or("");
+            let ct = fluxrs_model::header_value(headers, "content-type").unwrap_or("");
             if !raw && (ct.contains("json") || text.trim_start().starts_with('{')) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
                     if let Ok(pretty) = serde_json::to_string_pretty(&v) {
@@ -1102,7 +1106,7 @@ fn to_curl(ex: &Exchange) -> String {
             shell_quote(&String::from_utf8_lossy(&ex.request.body))
         ));
     }
-    if fluxrs_core::model::header_value(&ex.request.headers, "accept-encoding").is_some() {
+    if fluxrs_model::header_value(&ex.request.headers, "accept-encoding").is_some() {
         out.push_str(" \\\n  --compressed");
     }
     out

@@ -263,13 +263,7 @@ impl ResolvesServerCert for FixedCert {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustStatus {
-    Trusted,
-    NotTrusted,
-    /// Not checkable on this platform.
-    Unknown,
-}
+pub use fluxrs_model::TrustStatus;
 
 #[cfg(windows)]
 fn os_trust_status(serial: &str) -> TrustStatus {

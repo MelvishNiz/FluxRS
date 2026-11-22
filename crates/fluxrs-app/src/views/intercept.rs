@@ -4,7 +4,7 @@ use crate::app::FluxApp;
 use crate::theme::{icon, *};
 use crate::views::rules::filter_editor;
 use eframe::egui::{self, Margin, RichText, Stroke};
-use fluxrs_core::{Decision, InterceptPhase};
+use fluxrs_model::{Decision, InterceptPhase};
 
 #[derive(Default)]
 pub struct InterceptState {
@@ -124,7 +124,7 @@ fn ticket_list(app: &mut FluxApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             let mut clicked = None;
             for (i, t) in app.tickets.iter().enumerate() {
-                let Some(ticket) = &t.ticket else { continue };
+                let ticket = &t.info;
                 let selected = i == app.intercept_ui.selected;
                 let resp = egui::Frame::new()
                     .fill(if selected { RAISED } else { SURFACE })
@@ -181,7 +181,7 @@ fn editor(app: &mut FluxApp, ui: &mut egui::Ui) {
     card().show(ui, |ui| {
         ui.set_min_size(ui.available_size());
         let pending = &mut app.tickets[idx];
-        let Some(ticket) = &pending.ticket else { return };
+        let ticket = pending.info.clone();
         ui.horizontal(|ui| {
             phase_pill(ui, ticket.phase);
             ui.add(

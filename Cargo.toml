@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fluxrs-core", "crates/fluxrs-app"]
+members = ["crates/fluxrs-model", "crates/fluxrs-core", "crates/fluxrs-app"]
 
 [workspace.package]
 version = "0.1.0"
