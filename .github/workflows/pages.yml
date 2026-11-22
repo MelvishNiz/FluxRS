@@ -28,8 +28,24 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
     steps:
       - uses: actions/checkout@v5
+
+      # Without Pages enabled, deploying fails: build anyway, then skip the
+      # deploy with a clear warning instead of a red run.
+      - name: Check GitHub Pages is enabled
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/pages" > /dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning title=GitHub Pages is not enabled::Open Settings -> Pages, set Source to 'GitHub Actions', then re-run this workflow."
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -47,13 +63,16 @@ jobs:
           touch crates/fluxrs-app/web/dist/.nojekyll
 
       - uses: actions/configure-pages@v5
+        if: steps.pages.outputs.enabled == 'true'
 
       - uses: actions/upload-pages-artifact@v4
+        if: steps.pages.outputs.enabled == 'true'
         with:
           path: crates/fluxrs-app/web/dist
 
   deploy:
     needs: build
+    if: needs.build.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
