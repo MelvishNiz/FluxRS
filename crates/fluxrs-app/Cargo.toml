@@ -1,6 +1,6 @@
 [package]
 name = "fluxrs-app"
-description = "FluxRS - modern proxyless HTTP debugger for Windows (GUI)"
+description = "FluxRS - modern proxyless HTTP debugger for Windows and Linux (GUI)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -28,24 +28,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 parking_lot = "0.12"
 bytes = "1"
-web-time = "1"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fluxrs-core = { path = "../fluxrs-core" }
 dirs = "6"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
-tokio = { version = "1.47", features = ["rt-multi-thread", "net", "sync", "time", "macros", "signal"] }
-axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["fs"] }
-getrandom = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 signal-hook = "0.3"
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-ewebsock = "0.8"
-wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "Location", "Element", "HtmlCanvasElement", "console", "Storage"] }
 
 [build-dependencies]
 embed-manifest = "1.4"
@@ -63,5 +51,4 @@ assets = [
     ["target/release/fluxrs", "usr/bin/", "755"],
     ["assets/linux/fluxrs.desktop", "usr/share/applications/", "644"],
     ["assets/linux/fluxrs.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
-    ["web/dist/*", "usr/share/fluxrs/web/", "644"],
 ]

@@ -1,4 +1,4 @@
-//! Content-Encoding decoding (gzip, deflate, br). Pure Rust, works in wasm.
+//! Content-Encoding decoding (gzip, deflate, br). Pure Rust.
 
 use crate::exchange::{header_value, HeaderList};
 use bytes::Bytes;

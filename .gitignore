@@ -1,4 +1,3 @@
 /target
 /dist
 *.pdb
-/crates/fluxrs-app/web/dist

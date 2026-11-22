@@ -129,11 +129,7 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
                             && primary_button(
                                 ui,
                                 icon::SHIELD_CHECK,
-                                if app.is_local() {
-                                    "Install certificate"
-                                } else {
-                                    "Install on host"
-                                },
+                                "Install certificate",
                                 ACCENT,
                             )
                                 .clicked()
@@ -169,17 +165,10 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
                 ctx.copy_text(ca.pem.clone());
                 app.toast(&ctx, "Certificate copied", GREEN);
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            if app.is_local() && ghost_button(ui, icon::FOLDER_OPEN, "Open folder").clicked() {
+            if ghost_button(ui, icon::FOLDER_OPEN, "Open folder").clicked() {
                 if let Some(dir) = std::path::Path::new(&ca.path).parent() {
                     open_folder(dir);
                 }
-            }
-            if let Some(base) = app.http_base() {
-                ui.hyperlink_to(
-                    RichText::new("Download certificate").color(ACCENT_HI),
-                    format!("{base}/ca.crt"),
-                );
             }
             if !app.settings_ui.confirm_regenerate {
                 if ghost_button(ui, icon::ROTATE_CCW, "Regenerate").clicked() {
@@ -377,7 +366,6 @@ fn about_card(ui: &mut egui::Ui) {
     });
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn open_folder(path: &std::path::Path) {
     #[cfg(windows)]
     let cmd = "explorer";

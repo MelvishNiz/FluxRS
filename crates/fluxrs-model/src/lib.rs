@@ -1,6 +1,6 @@
 //! Data model shared by the FluxRS engine, the desktop app and the web UI.
 //!
-//! Pure data + serde: compiles for native targets and `wasm32`.
+//! Pure data + serde, shared by the engine and the UI.
 
 pub mod codec;
 pub mod config;

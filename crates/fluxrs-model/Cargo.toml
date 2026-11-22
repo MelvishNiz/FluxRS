@@ -1,6 +1,6 @@
 [package]
 name = "fluxrs-model"
-description = "Shared, wasm-compatible data model and protocol of FluxRS"
+description = "Shared data model and protocol of FluxRS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -58,7 +58,6 @@ pub mod icon {
     pub const ROTATE_CCW: &str = "\u{E148}";
     pub const SEND: &str = "\u{E152}";
     pub const BAN: &str = "\u{E051}";
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub const FOLDER_OPEN: &str = "\u{E247}";
     pub const TERMINAL: &str = "\u{E181}";
     pub const LIST_PLUS: &str = "\u{E23F}";
@@ -582,7 +581,6 @@ pub fn logo(ui: &mut Ui, size: f32) {
 }
 
 /// Window icon (RGBA) rendered procedurally.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn window_icon() -> egui::IconData {
     let n = 64usize;
     let mut rgba = vec![0u8; n * n * 4];

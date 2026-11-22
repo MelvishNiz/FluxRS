@@ -4,7 +4,7 @@
 //! [`ServerMsg`]s and sends [`ClientMsg`]s through a [`Backend`], so the
 //! same code runs on the desktop and in the browser.
 
-use crate::backend::{Backend, ConnectionState};
+use crate::backend::Backend;
 use crate::theme::{self, icon, *};
 use crate::views;
 use eframe::egui::{self, Margin, RichText, Stroke};
@@ -89,13 +89,11 @@ pub struct FluxApp {
     pub rules_ui: views::rules::RulesState,
     pub intercept_ui: views::intercept::InterceptState,
     pub settings_ui: views::settings::SettingsState,
-    /// Remote connect form (host, token).
-    connect_form: Option<(String, String)>,
 }
 
 fn now() -> Duration {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
 }
 
@@ -124,14 +122,12 @@ impl FluxApp {
             rules_ui: Default::default(),
             intercept_ui: Default::default(),
             settings_ui: Default::default(),
-            connect_form: None,
         };
         app.process_messages(&cc.egui_ctx);
         app
     }
 
     /// Apply `--view <name>` and `--start` (desktop command line).
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn apply_args(&mut self, args: &[String], ctx: &egui::Context) {
         if let Some(v) = args
             .iter()
@@ -152,10 +148,6 @@ impl FluxApp {
         }
     }
 
-    pub fn is_local(&self) -> bool {
-        self.backend.is_local()
-    }
-
     pub fn log(&mut self, level: LogLevel, text: impl Into<String>) {
         self.logs.push_back(LogLine {
             time: now(),
@@ -174,11 +166,6 @@ impl FluxApp {
             color,
             until: now + 3.5,
         });
-    }
-
-    /// Remote: HTTP base URL of the connected host.
-    pub fn http_base(&self) -> Option<String> {
-        self.backend.http_base()
     }
 
     fn send(&mut self, msg: ClientMsg) {
@@ -485,18 +472,10 @@ impl FluxApp {
                 ui.add_space(2.0);
                 if ui
                     .add(
-                        egui::Button::new(strong(
-                            if self.is_local() {
-                                "Install certificate"
-                            } else {
-                                "Install on host"
-                            },
-                            12.0,
-                            YELLOW,
-                        ))
-                        .fill(YELLOW.gamma_multiply(0.12))
-                        .stroke(Stroke::new(1.0, YELLOW.gamma_multiply(0.4)))
-                        .min_size(egui::vec2(ui.available_width(), 26.0)),
+                        egui::Button::new(strong("Install certificate", 12.0, YELLOW))
+                            .fill(YELLOW.gamma_multiply(0.12))
+                            .stroke(Stroke::new(1.0, YELLOW.gamma_multiply(0.4)))
+                            .min_size(egui::vec2(ui.available_width(), 26.0)),
                     )
                     .clicked()
                 {
@@ -662,184 +641,6 @@ impl FluxApp {
         });
     }
 
-    /// Remote UI: connection state and the connect form. Returns false
-    /// while there is no host state to show.
-    fn connection_banner(&mut self, ui: &mut egui::Ui, state: &ConnectionState) -> bool {
-        if self.ready && *state == ConnectionState::Connected {
-            self.connect_form = None;
-            return true;
-        }
-        let show_form = self.connect_form.is_some()
-            || matches!(state, ConnectionState::NeedsSetup)
-            || (!self.ready && matches!(state, ConnectionState::Disconnected(_)));
-        if self.ready && !show_form {
-            // Keep the last known state visible behind a banner.
-            let text = match state {
-                ConnectionState::Disconnected(e) => e.clone(),
-                _ => String::new(),
-            };
-            let mut change = false;
-            egui::Panel::top("conn_banner")
-                .frame(
-                    egui::Frame::new()
-                        .fill(RED.gamma_multiply(0.15))
-                        .inner_margin(Margin::symmetric(16, 6)),
-                )
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(ico(icon::CIRCLE_ALERT, 14.0, RED));
-                        ui.label(strong("Connection lost — retrying", 13.0, TEXT));
-                        ui.label(RichText::new(text).size(12.0).color(TEXT_DIM));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            change = ghost_button(ui, icon::SERVER, "Change host").clicked();
-                        });
-                    });
-                });
-            if change {
-                self.open_connect_form();
-            }
-            return true;
-        }
-        if show_form {
-            self.connect_screen(ui, state);
-            return false;
-        }
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG))
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.add_space(ui.available_height() * 0.35);
-                    logo(ui, 56.0);
-                    ui.add_space(14.0);
-                    ui.label(strong("Connecting to FluxRS…", 18.0, TEXT));
-                    if let Some((host, _)) = self.backend.target() {
-                        ui.label(RichText::new(host).font(mono(12.5)).color(TEXT_DIM));
-                    }
-                    ui.add_space(10.0);
-                    ui.spinner();
-                });
-            });
-        false
-    }
-
-    fn open_connect_form(&mut self) {
-        let (host, token) = self.backend.target().unwrap_or_default();
-        let host = if host.is_empty() {
-            "127.0.0.1:8800".to_string()
-        } else {
-            host
-        };
-        self.connect_form = Some((host, token));
-    }
-
-    fn connect_screen(&mut self, ui: &mut egui::Ui, state: &ConnectionState) {
-        if self.connect_form.is_none() {
-            self.open_connect_form();
-        }
-        let mut submit = false;
-        let mut cancel = false;
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG))
-            .show(ui, |ui| {
-                let avail = ui.available_rect_before_wrap();
-                let w = 460.0f32.min(avail.width() - 32.0);
-                let top = avail.top() + (avail.height() * 0.12).max(16.0);
-                let rect = egui::Rect::from_min_max(
-                    egui::pos2(avail.center().x - w / 2.0, top),
-                    egui::pos2(avail.center().x + w / 2.0, avail.bottom()),
-                );
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(rect)
-                        .layout(egui::Layout::top_down(egui::Align::Center)),
-                    |ui| {
-                        logo(ui, 56.0);
-                        ui.add_space(12.0);
-                        ui.label(strong("Connect to FluxRS", 22.0, TEXT));
-                        ui.label(
-                            RichText::new("The capture engine runs on your computer. Start it with:")
-                                .color(TEXT_DIM),
-                        );
-                        ui.add_space(6.0);
-                        inset().show(ui, |ui| {
-                            ui.label(RichText::new("fluxrs --serve").font(mono(13.0)).color(CYAN));
-                        });
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(
-                                "then open the link it prints, or enter its address and token below.",
-                            )
-                            .size(12.0)
-                            .color(TEXT_FAINT),
-                        );
-                        ui.add_space(16.0);
-                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                            card().show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                let form = self.connect_form.as_mut().expect("form");
-                                caption(ui, "Host");
-                                let host = ui.add(
-                                    egui::TextEdit::singleline(&mut form.0)
-                                        .hint_text("127.0.0.1:8800")
-                                        .font(mono(13.0))
-                                        .desired_width(f32::INFINITY),
-                                );
-                                ui.add_space(8.0);
-                                caption(ui, "Token");
-                                let token = ui.add(
-                                    egui::TextEdit::singleline(&mut form.1)
-                                        .hint_text("printed by fluxrs --serve")
-                                        .font(mono(13.0))
-                                        .password(true)
-                                        .desired_width(f32::INFINITY),
-                                );
-                                let enter = (host.lost_focus() || token.lost_focus())
-                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                ui.add_space(12.0);
-                                if let ConnectionState::Disconnected(e) = state {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(ico(icon::CIRCLE_ALERT, 13.0, RED));
-                                        ui.label(
-                                            RichText::new(format!("Could not connect: {e}"))
-                                                .size(12.0)
-                                                .color(RED),
-                                        );
-                                    });
-                                    ui.add_space(8.0);
-                                }
-                                ui.horizontal(|ui| {
-                                    submit = primary_button(ui, icon::SEND, "Connect", ACCENT)
-                                        .clicked()
-                                        || enter;
-                                    if self.ready
-                                        && ghost_button(ui, icon::X, "Cancel").clicked()
-                                    {
-                                        cancel = true;
-                                    }
-                                });
-                                ui.add_space(10.0);
-                                ui.label(
-                                    RichText::new(
-                                        "From an https page such as GitHub Pages, browsers only allow plain ws:// connections to localhost / 127.0.0.1. For another machine, open the link served by that machine.",
-                                    )
-                                    .size(11.5)
-                                    .color(TEXT_FAINT),
-                                );
-                            });
-                        });
-                    },
-                );
-            });
-        if submit {
-            if let Some((host, token)) = self.connect_form.take() {
-                self.ready = false;
-                self.backend.configure(&host, &token);
-            }
-        } else if cancel {
-            self.connect_form = None;
-        }
-    }
-
     fn show_toasts(&mut self, ui: &mut egui::Ui) {
         let now = ui.input(|i| i.time);
         self.toasts.retain(|t| t.until > now);
@@ -880,15 +681,6 @@ impl eframe::App for FluxApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.process_messages(&ctx);
-        if let Some(state) = self.backend.connection() {
-            if state != ConnectionState::Connected {
-                // Keep polling while (re)connecting.
-                ctx.request_repaint_after(Duration::from_millis(500));
-            }
-            if !self.connection_banner(ui, &state) {
-                return;
-            }
-        }
 
         egui::Panel::left("sidebar")
             .resizable(false)
@@ -937,11 +729,8 @@ impl eframe::App for FluxApp {
         self.show_toasts(ui);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Desktop: stop capture (and remove proxyless redirection) on exit.
-        if self.is_local() {
-            self.stop();
-        }
+        // Stop capture (and remove proxyless redirection) on exit.
+        self.stop();
     }
 }

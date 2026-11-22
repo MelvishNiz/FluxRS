@@ -1,7 +1,6 @@
 //! Native host: owns the capture engine, the root CA, settings and rules.
 //!
-//! User interfaces talk to it only through [`ClientMsg`] / [`ServerMsg`]:
-//! the desktop app in-process, the browser UI over a WebSocket.
+//! The UI talks to it only through [`ClientMsg`] / [`ServerMsg`].
 
 use crate::store;
 use fluxrs_core::protocol::{CaInfo, ClientMsg, Hello, ServerMsg, Status, PROTOCOL_VERSION};
@@ -103,10 +102,6 @@ impl Host {
         })
     }
 
-    pub fn ca_pem(&self) -> Option<String> {
-        self.ca.as_ref().map(|c| c.ca_pem().to_string())
-    }
-
     /// Full state for a newly connected interface.
     pub fn hello(&self) -> ServerMsg {
         ServerMsg::Hello(Box::new(Hello {
@@ -122,13 +117,6 @@ impl Host {
             ca_error: self.ca_error.clone(),
             trust: *self.trust.lock(),
         }))
-    }
-
-    /// Paused messages (for interfaces connecting later).
-    pub fn ticket_infos(&self) -> Vec<fluxrs_model::TicketInfo> {
-        let mut v: Vec<_> = self.tickets.values().map(|t| t.info()).collect();
-        v.sort_by_key(|t| t.ticket_id);
-        v
     }
 
     fn refresh_trust(&mut self) {

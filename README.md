@@ -88,60 +88,6 @@ stop, on Ctrl+C or `kill`, and after a crash. If a session is killed with
 fluxrs --cleanup
 ```
 
-## Browser UI (WebAssembly)
-
-The same egui interface also runs in a browser, compiled to WebAssembly. The
-capture engine cannot run inside a browser (no raw sockets, no WinDivert or
-iptables), so it runs headless on a machine and the browser connects to it:
-
-```bash
-fluxrs --serve
-```
-
-It prints a link like `http://127.0.0.1:8800/#token=…`. Open it in any modern
-browser.
-
-**Online version:** the web UI is also published on GitHub Pages at
-<https://melvishniz.github.io/http-debugger2/>. The page connects to the
-FluxRS engine running on your computer: `fluxrs --serve` prints a ready link
-(`…#host=127.0.0.1:8800&token=…`), or enter the host and token in the connect
-form. The page remembers both in the browser. Browsers allow an https page to
-reach `ws://127.0.0.1` or `ws://localhost`, but not plain `ws://` to other
-machines. For another machine, open the link that machine serves itself.
-Chrome may ask for permission to access devices on the local network. Options:
-
-* `--listen 0.0.0.0:8800`: reachable from other devices on the LAN (use the
-  machine's IP address in the link). Only do this on a trusted network.
-* `--token <secret>`: fixed token instead of a random one.
-* `--web-root <dir>`: location of the web files (default: `web/` next to the
-  executable, or `/usr/share/fluxrs/web` from the `.deb`).
-
-![Browser UI](docs/web.png)
-
-The browser talks to the engine over a WebSocket (`/ws`, JSON messages from
-`crates/fluxrs-model/src/protocol.rs`). Every connection needs the token.
-`/ca.crt` serves the root certificate, so other devices can download and
-trust it. Bodies larger than 1 MB are truncated before they are sent to the
-browser. Stop the server with Ctrl+C: capture stops and proxyless rules are
-removed.
-
-Build the web files yourself:
-
-```bash
-rustup target add wasm32-unknown-unknown
-```
-
-```bash
-cargo install wasm-bindgen-cli --version 0.2.130 --locked
-```
-
-```bash
-crates/fluxrs-app/web/build.sh
-```
-
-The version must match `wasm-bindgen` in `Cargo.lock`. The output goes to
-`crates/fluxrs-app/web/dist`. Release packages already contain it in `web/`.
-
 ## Limitations
 
 * Only HTTP/1.1 is used between clients and FluxRS (ALPN offers only
@@ -192,9 +138,9 @@ next to it.
 ## Project layout
 
 ```
-crates/fluxrs-model  shared data model + UI/host protocol (serde, also compiles to wasm)
+crates/fluxrs-model  shared data model + UI/host protocol (serde)
 crates/fluxrs-core   engine: proxy, TLS MITM, certificates, rules, intercept, WinDivert, iptables
-crates/fluxrs-app    egui UI (desktop + wasm), host, `--serve` web server
+crates/fluxrs-app    egui desktop UI and host
 .github/workflows    ci.yml (fmt, clippy, tests on every push), build.yml (manual release build)
 ```
 
@@ -202,9 +148,6 @@ crates/fluxrs-app    egui UI (desktop + wasm), host, `--serve` web server
 
 * **CI** (`ci.yml`) runs on every push and pull request: `cargo fmt`,
   `clippy -D warnings` and every test on Windows, plus core tests on Linux.
-* **Pages** (`pages.yml`) builds the web UI and deploys it to GitHub Pages
-  on every push that changes the code. One-time setup: Settings → Pages →
-  Source: **GitHub Actions**.
 * **Build** (`build.yml`) is started manually from the Actions tab
   (*Run workflow*). It tests, builds the release exe, downloads WinDivert
   (SHA-256 checked) and uploads a ready-to-run package.

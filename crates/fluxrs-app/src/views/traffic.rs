@@ -96,16 +96,8 @@ pub fn show(app: &mut FluxApp, ui: &mut egui::Ui) {
             ui,
             YELLOW,
             icon::SHIELD_ALERT,
-            if app.is_local() {
-                "HTTPS traffic can't be decrypted until the FluxRS root certificate is trusted."
-            } else {
-                "The FluxRS root certificate is not trusted on the host machine. Other devices: download it in Settings."
-            },
-            Some(if app.is_local() {
-                "Install certificate"
-            } else {
-                "Install on host"
-            }),
+            "HTTPS traffic can't be decrypted until the FluxRS root certificate is trusted.",
+            Some("Install certificate"),
         ) {
             app.install_ca(&ctx);
         }
