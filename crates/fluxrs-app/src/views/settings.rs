@@ -201,7 +201,7 @@ fn certificate_card(app: &mut FluxApp, ui: &mut egui::Ui) {
             ui.label(ico(icon::INFO, 12.0, TEXT_FAINT));
             ui.label(
                 RichText::new(
-                    "Firefox keeps its own store: import the file under Settings › Certificates, or set security.enterprise_roots.enabled to true.",
+                    "Install certificate also configures Firefox (its own store): restart Firefox afterwards. Error MITM_DETECTED in Firefox means the CA is not installed yet.",
                 )
                 .size(11.5)
                 .color(TEXT_FAINT),

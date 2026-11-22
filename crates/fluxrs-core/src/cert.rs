@@ -306,14 +306,47 @@ fn install_root_ca(path: &Path) -> Result<String, CertError> {
             .creation_flags(CREATE_NO_WINDOW)
             .output()
     };
+    // Firefox keeps its own store: the ImportEnterpriseRoots policy makes
+    // it trust the Windows store too (HKLM needs admin, else HKCU).
+    let firefox = || {
+        let ok = |hive: &str| {
+            std::process::Command::new("reg")
+                .args([
+                    "add",
+                    &format!(r"{hive}\SOFTWARE\Policies\Mozilla\Firefox\Certificates"),
+                    "/v",
+                    "ImportEnterpriseRoots",
+                    "/t",
+                    "REG_DWORD",
+                    "/d",
+                    "1",
+                    "/f",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if ok("HKLM") || ok("HKCU") {
+            " Firefox set to trust it (restart Firefox)."
+        } else {
+            ""
+        }
+    };
     // Machine store first (needs admin, no prompt), then the user store.
     let out = run(&["-addstore", "-f", "Root"])?;
     if out.status.success() {
-        return Ok("Root CA installed in the local machine trust store.".into());
+        return Ok(format!(
+            "Root CA installed in the local machine trust store.{}",
+            firefox()
+        ));
     }
     let out2 = run(&["-addstore", "-user", "-f", "Root"])?;
     if out2.status.success() {
-        return Ok("Root CA installed in the current user trust store.".into());
+        return Ok(format!(
+            "Root CA installed in the current user trust store.{}",
+            firefox()
+        ));
     }
     Err(CertError::Other(format!(
         "certutil failed: {}",
@@ -342,43 +375,164 @@ mod linux {
         format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
     }
 
+    /// Firefox enterprise policy directory (read by deb, tarball and snap builds).
+    pub const FIREFOX_POLICY_DIR: &str = "/etc/firefox/policies";
+    const FIREFOX_POLICY_CERT: &str = "/etc/firefox/policies/fluxrs-root-ca.crt";
+
     pub fn install(path: &Path) -> Result<String, CertError> {
-        let script = format!(
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let firefox = home
+            .as_deref()
+            .is_some_and(|h| !firefox_profiles(h).is_empty())
+            || firefox_installed();
+        let mut script = format!(
             "install -m 644 {} {SYSTEM_PATH} && update-ca-certificates",
             quote(path)
         );
-        crate::netfilter::run_privileged(&script).map_err(CertError::Other)?;
+        // Firefox ignores the system store: add the CA through its policy
+        // file as well (covers every profile, including the snap build).
+        let mut policy_note = None;
+        if firefox {
+            let existing =
+                std::fs::read_to_string(Path::new(FIREFOX_POLICY_DIR).join("policies.json")).ok();
+            match firefox_policy(existing.as_deref(), FIREFOX_POLICY_CERT) {
+                Ok(json) => {
+                    let tmp = path.with_file_name("firefox-policies.json");
+                    std::fs::write(&tmp, json)?;
+                    script.push_str(&format!(
+                        " && install -d -m 755 {FIREFOX_POLICY_DIR} && install -m 644 {} {FIREFOX_POLICY_CERT} && install -m 644 {} {FIREFOX_POLICY_DIR}/policies.json",
+                        quote(path),
+                        quote(&tmp)
+                    ));
+                }
+                Err(e) => policy_note = Some(e),
+            }
+        }
+        crate::netfilter::run_privileged(&script).map_err(|e| {
+            CertError::Other(e.replace("iptables setup failed", "certificate install failed"))
+        })?;
         let mut msg =
             String::from("Root CA installed in the system store (update-ca-certificates).");
-        // Chrome/Chromium read the per-user NSS database.
-        if let Some(home) = std::env::var_os("HOME") {
-            let db = Path::new(&home).join(".pki/nssdb");
-            let has_certutil = Command::new("certutil").arg("-H").output().is_ok();
+        let has_certutil = Command::new("certutil").arg("-H").output().is_ok();
+        if let Some(home) = home.as_deref() {
             if has_certutil {
-                let dbarg = format!("sql:{}", db.display());
+                // Chrome/Chromium read the per-user NSS database.
+                let db = home.join(".pki/nssdb");
                 if !db.join("cert9.db").exists() {
                     let _ = std::fs::create_dir_all(&db);
                     let _ = Command::new("certutil")
-                        .args(["-d", &dbarg, "-N", "--empty-password"])
+                        .arg("-d")
+                        .arg(format!("sql:{}", db.display()))
+                        .args(["-N", "--empty-password"])
                         .output();
                 }
-                let _ = Command::new("certutil")
-                    .args(["-d", &dbarg, "-D", "-n", NSS_NICK])
-                    .output();
-                let ok = Command::new("certutil")
-                    .args(["-d", &dbarg, "-A", "-t", "C,,", "-n", NSS_NICK, "-i"])
-                    .arg(path)
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if ok {
-                    msg.push_str(" Also added to Chrome's NSS store.");
+                if nss_add(&db, path) {
+                    msg.push_str(" Added to Chrome's NSS store.");
+                }
+                // Existing Firefox profiles: effective without the policy file.
+                let added = firefox_profiles(home)
+                    .iter()
+                    .filter(|p| nss_add(p, path))
+                    .count();
+                if added > 0 {
+                    msg.push_str(&format!(" Added to {added} Firefox profile(s)."));
                 }
             } else {
-                msg.push_str(" Install libnss3-tools to also trust it in Chrome automatically.");
+                msg.push_str(" Install libnss3-tools to also add it to Chrome automatically.");
+            }
+        }
+        if firefox {
+            match policy_note {
+                None => msg.push_str(" Firefox policy updated: restart Firefox."),
+                Some(e) => msg.push_str(&format!(" Firefox policy not changed: {e}.")),
             }
         }
         Ok(msg)
+    }
+
+    /// Add (or replace) the CA in an NSS sql database.
+    fn nss_add(db: &Path, cert: &Path) -> bool {
+        let dbarg = format!("sql:{}", db.display());
+        let _ = Command::new("certutil")
+            .args(["-d", &dbarg, "-D", "-n", NSS_NICK])
+            .output();
+        Command::new("certutil")
+            .args(["-d", &dbarg, "-A", "-t", "C,,", "-n", NSS_NICK, "-i"])
+            .arg(cert)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    fn firefox_installed() -> bool {
+        [
+            "/usr/bin/firefox",
+            "/usr/bin/firefox-esr",
+            "/snap/bin/firefox",
+            "/usr/lib/firefox",
+            "/usr/lib/firefox-esr",
+            "/opt/firefox",
+            "/var/lib/flatpak/app/org.mozilla.firefox",
+        ]
+        .iter()
+        .any(|p| Path::new(p).exists())
+    }
+
+    /// Firefox profile directories (deb/tarball, snap and flatpak) that
+    /// contain an NSS sql database.
+    pub fn firefox_profiles(home: &Path) -> Vec<std::path::PathBuf> {
+        let roots = [
+            ".mozilla/firefox",
+            "snap/firefox/common/.mozilla/firefox",
+            ".var/app/org.mozilla.firefox/.mozilla/firefox",
+        ];
+        let mut out = Vec::new();
+        for root in roots {
+            let Ok(dir) = std::fs::read_dir(home.join(root)) else {
+                continue;
+            };
+            for entry in dir.flatten() {
+                let p = entry.path();
+                if p.join("cert9.db").is_file() {
+                    out.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// `policies.json` with the CA added to `Certificates.Install`,
+    /// keeping every other policy of an existing file.
+    pub fn firefox_policy(existing: Option<&str>, cert: &str) -> Result<String, String> {
+        use serde_json::{json, Map, Value};
+        let mut root: Value = match existing {
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(s)
+                .map_err(|e| format!("existing policies.json is not valid JSON ({e})"))?,
+            _ => json!({}),
+        };
+        let obj = root
+            .as_object_mut()
+            .ok_or("existing policies.json is not an object")?;
+        let policies = obj
+            .entry("policies")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or("\"policies\" is not an object")?;
+        let certs = policies
+            .entry("Certificates")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or("\"Certificates\" is not an object")?;
+        let install = certs
+            .entry("Install")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or("\"Install\" is not an array")?;
+        if !install.iter().any(|v| v.as_str() == Some(cert)) {
+            install.push(Value::String(cert.to_string()));
+        }
+        serde_json::to_string_pretty(&root).map_err(|e| e.to_string())
     }
 }
 
@@ -412,5 +566,49 @@ mod tests {
         ca2.server_config("example.com").unwrap();
         let ca3 = CertificateAuthority::regenerate(dir.path()).unwrap();
         assert_ne!(pem1, ca3.ca_pem());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn firefox_policy_merges() {
+        use serde_json::Value;
+        let cert = "/etc/firefox/policies/fluxrs-root-ca.crt";
+        let fresh: Value =
+            serde_json::from_str(&linux::firefox_policy(None, cert).unwrap()).unwrap();
+        assert_eq!(fresh["policies"]["Certificates"]["Install"][0], cert);
+
+        let existing = r#"{"policies":{"DisableTelemetry":true,
+            "Certificates":{"ImportEnterpriseRoots":true,"Install":["other.crt"]}}}"#;
+        let merged = linux::firefox_policy(Some(existing), cert).unwrap();
+        let v: Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["policies"]["DisableTelemetry"], true);
+        assert_eq!(v["policies"]["Certificates"]["ImportEnterpriseRoots"], true);
+        let install = v["policies"]["Certificates"]["Install"].as_array().unwrap();
+        assert_eq!(install.len(), 2);
+        // Idempotent.
+        let again: Value =
+            serde_json::from_str(&linux::firefox_policy(Some(&merged), cert).unwrap()).unwrap();
+        assert_eq!(again, v);
+        // Never clobber a file we cannot parse.
+        assert!(linux::firefox_policy(Some("{oops"), cert).is_err());
+        assert!(linux::firefox_policy(Some("[]"), cert).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn finds_firefox_profiles() {
+        let home = tempfile::tempdir().unwrap();
+        let mk = |rel: &str, db: bool| {
+            let d = home.path().join(rel);
+            std::fs::create_dir_all(&d).unwrap();
+            if db {
+                std::fs::write(d.join("cert9.db"), b"").unwrap();
+            }
+        };
+        mk(".mozilla/firefox/abc.default-release", true);
+        mk(".mozilla/firefox/Crash Reports", false);
+        mk("snap/firefox/common/.mozilla/firefox/x.default", true);
+        let found = linux::firefox_profiles(home.path());
+        assert_eq!(found.len(), 2, "{found:?}");
     }
 }

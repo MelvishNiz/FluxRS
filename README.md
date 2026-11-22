@@ -49,9 +49,9 @@ and an OpenGL 2 capable GPU driver.
 2. Keep `fluxrs.exe`, `WinDivert.dll` and `WinDivert64.sys` in the same folder.
 3. Start `fluxrs.exe`. It asks for Administrator rights, which loading the
    WinDivert driver requires.
-4. **Settings → Install certificate** adds the root CA to the Windows trust store once.
-   Firefox uses its own store: import `fluxrs-root-ca.crt` there or enable
-   `security.enterprise_roots.enabled`.
+4. **Settings → Install certificate** adds the root CA to the Windows trust store once
+   and sets the Firefox policy `ImportEnterpriseRoots`, so Firefox trusts it too
+   (restart Firefox).
 5. Press **Start capture**.
 
 Data (CA, `settings.json`, `rules.json`) lives in `%APPDATA%\FluxRS` on Windows and
@@ -70,7 +70,10 @@ Command-line flags: `--start` starts capturing at launch;
 3. **Settings → Install certificate** copies the root CA to
    `/usr/local/share/ca-certificates`, runs `update-ca-certificates` (password
    prompt) and adds it to Chrome's NSS store when `libnss3-tools` is installed.
-   Firefox: import the file under Settings › Certificates.
+   Firefox does not use the system store, so FluxRS also adds the CA to
+   `/etc/firefox/policies/policies.json` (works for the deb, tarball and snap
+   builds; other policies in the file are kept) and to every existing Firefox
+   profile. Restart Firefox afterwards.
 4. Choose **Proxyless** and press **Start capture**. FluxRS asks for the admin
    password once to add iptables rules, and once more to remove them on stop.
 
@@ -145,6 +148,9 @@ The version must match `wasm-bindgen` in `Cargo.lock`. The output goes to
   `http/1.1`). HTTP/2 and HTTP/3 are not decoded.
 * Proxyless mode redirects IPv4 on ports 80 and 443. New IPv6 connections
   to those ports are dropped, so clients fall back to IPv4.
+* Firefox error `MOZILLA_PKIX_ERROR_MITM_DETECTED` means Firefox does not
+  trust the FluxRS root CA yet: press **Settings → Install certificate**, then
+  restart Firefox.
 * Apps that pin certificates fail the TLS handshake. Add their hosts to
   **Settings → Never decrypt**.
 * WinDivert needs a 64-bit Windows that can load signed kernel drivers.
